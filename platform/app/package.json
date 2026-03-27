@@ -89,6 +89,7 @@
     "i18next": "17.3.1",
     "i18next-browser-languagedetector": "3.1.1",
     "lodash.isequal": "4.5.0",
+    "ohif-aws-healthimaging": "^0.12.2",
     "oidc-client": "1.11.5",
     "oidc-client-ts": "3.3.0",
     "prop-types": "15.8.1",

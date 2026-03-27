@@ -1,0 +1,12 @@
+services:
+  ohif-proxy:
+    build: ./proxy
+    ports:
+      - "8089:8089"
+    environment:
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      # In development, credentials come from env vars or .env file.
+      # In production (EC2/ECS), remove these and use IAM role.
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+    restart: unless-stopped
