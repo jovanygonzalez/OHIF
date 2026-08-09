@@ -44,7 +44,9 @@ viewer/
 │
 ├── platform/app/
 │   ├── public/config/
-│   │   └── aws-healthimaging.js    # Configuración del datasource y branding
+│   │   ├── genx-base.js            # Config compartida por todos los clientes
+│   │   ├── clients/{slug}.js       # Delta por cliente (datastore, título, logo)
+│   │   └── aws-healthimaging.js    # v1/v2: CONGELADOS, solo rollback
 │   ├── public/assets/
 │   │   ├── genx-logo.png           # Logo GenX (header del visor)
 │   │   └── genx-icon.png           # Ícono GenX (favicon)
@@ -204,13 +206,33 @@ OHIF pide:  GET /studies/{uid}/series/{uid}/.../frames/1?DatastoreID=xxx&ImageSe
 Proxy hace: POST /datastore/xxx/imageSet/yyy/getImageFrame  { imageFrameId: "zzz" }
 ```
 
-## Multi-hospital
+## Multi-cliente
 
-Un solo deploy del visor y proxy sirve a todos los hospitales. Cada hospital tiene su propio HealthImaging datastore. El `datastoreID` se puede pasar por URL:
+**Se compila una vez y se publica N veces.** Cada cliente tiene su propio datastore
+de HealthImaging, su propio prefijo en S3 y (a futuro) su propio dominio — pero
+todos corren exactamente los mismos bytes del bundle.
+
+Eso funciona porque webpack **no bundlea** el config: lo copia tal cual y lo carga
+un `<script src>` aparte. Así que el único archivo que distingue a un cliente se
+inyecta al publicar, no al compilar:
 
 ```
-https://viewer.genx.com/viewer?StudyInstanceUIDs=...&DatastoreID=abc123
+app-config.js  =  config/genx-base.js  +  config/clients/{slug}.js
 ```
+
+```bash
+scripts/build.sh v3                                                  # una vez
+scripts/publish-client.sh mx-san-mungo v3 genx-viewer <dist-id>      # por cliente
+```
+
+> ⚠️ **El `DatastoreID` NO se puede pasar por URL** — esta sección afirmaba lo
+> contrario y era falso. El extension ignora el query param: su constructor hace
+> `{...window.healthlake, ...qidoConfig.healthlake}`, o sea el config del build
+> gana siempre. Eso hoy es la garantía de aislamiento: un usuario no puede
+> reapuntar el visor al datastore de otro cliente editando la barra de direcciones.
+
+Detalle completo, alternativas descartadas y plan pendiente:
+[`GENX-MULTI-TENANT.md`](GENX-MULTI-TENANT.md).
 
 ## Personalización
 
@@ -220,7 +242,11 @@ https://viewer.genx.com/viewer?StudyInstanceUIDs=...&DatastoreID=abc123
 | Favicon | `platform/app/public/assets/genx-icon.png` |
 | Título de la página | `platform/app/public/html-templates/index.html` |
 | Colores/tema | `platform/ui/tailwind.config.js` y `platform/ui/src/tailwind.css` |
-| Configuración general | `platform/app/public/config/aws-healthimaging-v2.js` (v1: `aws-healthimaging.js`) |
+| Configuración general | `platform/app/public/config/genx-base.js` |
+| Lo que cambia por cliente | `platform/app/public/config/clients/{slug}.js` |
+
+Logo y título son por cliente sin recompilar: el delta puede pisar `whiteLabeling`
+y `document.title`. Lo demás (comportamiento del visor) va en el base y se comparte.
 
 ## Actualizar desde OHIF upstream
 

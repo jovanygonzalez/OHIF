@@ -1,4 +1,13 @@
 #!/usr/bin/env bash
+# LEGACY — solo para republicar v1/v2, que llevan el datastore horneado en su
+# config y no son multi-cliente. Para cualquier versión nueva usar:
+#
+#   scripts/build.sh <version>                                   # una vez
+#   scripts/publish-client.sh <slug> <version> <bucket> <dist-id> # por cliente
+#
+# Este script compila y publica en un solo paso, lo que obliga a un build por
+# cliente. Ver GENX-MULTI-TENANT.md.
+#
 # Build one version of the viewer and publish it to its S3 prefix, then
 # invalidate that prefix's CloudFront cache. Infra (bucket, distribution)
 # must already exist — see infra/viewer/.
