@@ -65,7 +65,16 @@ grep -q 'GENX_CONFIG_BASE' "${DIST_DIR}/app-config.js" || {
 COMPOSED="$(mktemp)"
 trap 'rm -f "$COMPOSED"' EXIT
 
-cat "${DIST_DIR}/app-config.js" "${CLIENT_CONFIG}" > "$COMPOSED"
+# El separador NO es cosmético. webpack pasa Terser también sobre los assets
+# copiados, así que dist/app-config.js sale minificado a UNA sola línea y sin
+# salto final. Un `cat` directo pegaría el último token del base con el primero
+# del delta (`...,0)Object.assign(...`). El `;` en medio cierra la sentencia
+# final del base pase lo que pase.
+{
+  cat "${DIST_DIR}/app-config.js"
+  printf '\n;\n'
+  cat "${CLIENT_CONFIG}"
+} > "$COMPOSED"
 
 # Ejecutar el resultado antes de subirlo: valida de una sola pasada que el delta
 # no tenga error de sintaxis y que el datastore quede realmente asignado. Se

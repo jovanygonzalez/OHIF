@@ -9,7 +9,8 @@ de AWS HealthImaging.
 |---|---|---|
 | 0 | Corregir la doc que prometía `?DatastoreID=` | ✅ Hecho |
 | 1 | Config por cliente + build/publish partidos | ✅ Hecho |
-| 2 | Distribución CloudFront por cliente + el RIS emite el enlace | ⬜ Pendiente |
+| 2a | Distribución CloudFront por cliente | ✅ Aplicada y verificada E2E |
+| 2b | El RIS emite el enlace | ⬜ Pendiente |
 | 3 | Subir la cuota de concurrencia de Lambda | ⏸️ **Pausada** por decisión |
 | 4 | Autorizar el proxy | ⏸️ **Pausada** por decisión |
 
@@ -148,6 +149,18 @@ Verificados en seco (`--dry-run`), los cuatro cortan antes de tocar S3:
 `genx-base.js` además loguea un error explícito si arranca sin datastore, para
 cubrir las subidas a mano que se saltan el script.
 
+### Trampa: `dist/app-config.js` sale minificado y sin salto de línea final
+
+webpack corre Terser también sobre los assets **copiados**, no solo sobre los
+bundleados. Así que el base llega al `dist/` en **una sola línea**, sin `\n` final
+y sin comentarios. Un `cat base delta` pegaría el último token del base con el
+primero del delta (`...,0)Object.assign(...`), rompiendo el archivo.
+
+Por eso `publish-client.sh` compone con `\n;\n` en medio. Dos consecuencias más:
+
+- El `app-config.js` **publicado no tiene comentarios**. El razonamiento vive en `config/genx-base.js`, no en lo que sirve producción.
+- El delta **no** se minifica (se anexa después), así que en el archivo servido aparece tal cual, con sus comillas simples. Terser no renombra propiedades, por eso el `Object.assign` del delta sigue encontrando `dataSources[0].configuration.healthlake` en el base minificado.
+
 ### Por qué el slug no aparece en la URL
 
 S3: `s3://{bucket}/clients/{slug}/{version}/` — URL: `https://{dominio}/{version}/viewer`.
@@ -163,15 +176,29 @@ no la llave de S3, porque CloudFront quita `origin_path` antes de ir al origen.
 
 ---
 
-## 5. Fase 2 — Lo que sigue
+## 5. Fase 2a — Distribución por cliente (escrita, falta aplicar)
 
-**Infra:** una distribución CloudFront por cliente, con su dominio, su
-certificado ACM y `origin_path = /clients/{slug}`, todas apuntando al mismo bucket
-y al mismo proxy Lambda compartido. Es aditivo y encaja con el patrón por hospital
-que ya existe en `infra/hospitals/`. Habrá que ajustar la CloudFront Function del
-SPA fallback, que hoy asume `/vN/` en la raíz.
+`modules/viewer-client-site`: una distribución CloudFront por cliente, todas sobre
+el **mismo** bucket, OAC, CloudFront Function y proxy Lambda. Lo único propio es
+`origin_path = /clients/{slug}`.
 
-**RIS:** el front emite `https://{dominio-cliente}/{version}/viewer?StudyInstanceUIDs=…`
+Alta de un cliente = una entrada en `clients` de `infra/viewer/terraform.tfvars`
++ su delta de config. **No** se recompila el visor.
+
+Dos cosas que resultaron más baratas de lo esperado:
+
+- **El SPA fallback no necesitó cambios.** Opera sobre la ruta que ve el navegador (`/v3/viewer` → `/v3/index.html`) y CloudFront antepone `origin_path` después, así que el prefijo del cliente le es invisible.
+- **No hace falta dominio propio para que funcione.** Cada distribución trae su `*.cloudfront.net`. `aliases` + certificado ACM (obligatoriamente en **us-east-1**) es un update in-place posterior, sin republicar nada.
+
+Lo que sí hubo que tocar: la policy del bucket condicionaba `AWS:SourceArn` a una
+sola distribución. Ahora enumera también las de cliente
+(`client_distribution_arns`). **Si se olvida, el cliente recibe 403 de S3 en
+todo.** Se enumeran explícitamente en vez de un `ArnLike` sobre `distribution/*`
+para que dar de alta un cliente sea un cambio visible en el plan.
+
+## 6. Fase 2b — El RIS emite el enlace (pendiente)
+
+El front emite `https://{dominio-cliente}/{version}/viewer?StudyInstanceUIDs=…`
 — sin datastore en la URL. La URL base va como `clinic_setting` (escalar, cambia
 casi nunca, se lee constantemente), que es lo que permite mover un cliente de `v3`
 a `v4`, o hacer rollback, sin tocar código de Flutter. Hoy nada en Flutter
@@ -179,7 +206,7 @@ construye URLs del visor, así que no hay nada que romper.
 
 ---
 
-## 6. Lo que queda abierto (pausado por decisión)
+## 7. Lo que queda abierto (pausado por decisión)
 
 ### Fase 3 — Cuota de concurrencia de Lambda ⏸️
 
@@ -221,7 +248,7 @@ por construcción.
 
 ---
 
-## 7. Lo que NO hacer
+## 8. Lo que NO hacer
 
 - **Un build por cliente.** Version skew garantizado, y no compra ningún aislamiento que el config por publish no dé.
 - **Meter el slug en `PUBLIC_URL`.** Rompe el build único; va en `origin_path`.
