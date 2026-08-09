@@ -121,7 +121,13 @@ export function isValidMode({ modalities }) {
   }
 
   return {
-    valid: !!modalities_list.find(modality => this.nonModeModalities.indexOf(modality) === -1),
+    // `some`, not `!!find`: `find` returns the matching *element*, so a study
+    // whose modality list is unknown (`''` -> `['']`) matched the predicate but
+    // produced a falsy result, and the mode was reported invalid. That is the
+    // opposite of the intended default — not knowing the modalities is not a
+    // reason to lock the user out of the viewer. AWS HealthImaging hits this on
+    // every study: the data source stubs ModalitiesInStudy (0008,0061) to `''`.
+    valid: modalities_list.some(modality => this.nonModeModalities.indexOf(modality) === -1),
     description: `The mode does not support studies that ONLY include the following modalities: ${this.nonModeModalities.join(', ')}`,
   };
 }
