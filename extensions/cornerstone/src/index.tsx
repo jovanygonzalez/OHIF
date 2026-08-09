@@ -75,7 +75,12 @@ const OHIFCornerstoneViewport = props => {
   );
 };
 
-const stackRetrieveOptions = {
+// Progressive HTJ2K loading: decode each partial chunk as it streams in.
+// This only works against a server that encodes frames so a *prefix* is
+// decodable (the static-wado design). Override it via
+// appConfig.stackRetrieveOptions for backends that don't — see
+// public/config/aws-healthimaging.js.
+const defaultStackRetrieveOptions = {
   retrieveOptions: {
     single: {
       streaming: true,
@@ -94,7 +99,7 @@ const cornerstoneExtension: Types.Extensions.Extension = {
    */
   id,
 
-  onModeEnter: ({ servicesManager, commandsManager }: withAppTypes): void => {
+  onModeEnter: ({ servicesManager, commandsManager, extensionManager }: withAppTypes): void => {
     const { cornerstoneViewportService, toolbarService, segmentationService } =
       servicesManager.services;
 
@@ -134,7 +139,10 @@ const cornerstoneExtension: Types.Extensions.Extension = {
     // The default stack loading option is to progressive load HTJ2K images
     // There are other possible options, but these need more thought about
     // how to define them.
-    imageRetrieveMetadataProvider.add('stack', stackRetrieveOptions);
+    imageRetrieveMetadataProvider.add(
+      'stack',
+      extensionManager?.appConfig?.stackRetrieveOptions ?? defaultStackRetrieveOptions
+    );
   },
   getPanelModule,
   onModeExit: ({ servicesManager }: withAppTypes): void => {

@@ -257,8 +257,10 @@ export default async function init({
    * @param event
    */
   const imageLoadFailedHandler = ({ detail }) => {
+    // getHTTPErrorHandler is a factory that returns undefined when the app
+    // config defines no httpErrorHandler, so this call is only safe optionally.
     const handler = errorHandler.getHTTPErrorHandler();
-    handler(detail.error);
+    handler?.(detail.error);
   };
 
   eventTarget.addEventListener(EVENTS.IMAGE_LOAD_FAILED, imageLoadFailedHandler);

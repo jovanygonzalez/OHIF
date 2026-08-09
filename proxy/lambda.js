@@ -4,15 +4,42 @@
  * Deploy as Lambda Function URL (no API Gateway needed).
  * Credentials come from the Lambda execution role automatically.
  * No env vars for AWS_ACCESS_KEY_ID/SECRET needed.
+ *
+ * Uses response streaming (invoke_mode = RESPONSE_STREAM, set on the
+ * Function URL in infra/modules/viewer-proxy-lambda). A buffered
+ * (non-streaming) Lambda response is capped at 6MB — a base64-encoded DICOM
+ * frame crosses that easily, and the runtime rejects it with
+ * RequestEntityTooLarge, which the Function URL surfaces to the browser as a
+ * bare 502. Streaming removes that cap (and the base64 inflation, since we
+ * write raw bytes) — the `awslambda` global below only exists inside the
+ * Lambda execution environment, not in Docker/local (see index.js).
  */
-import { rewriteRequest, proxyToAWS, CORS_HEADERS } from './core.js';
+import { rewriteRequest, proxyToAWS } from './core.js';
 
-export async function handler(event) {
+// The Function URL's own CORS config (infra/modules/viewer-proxy-lambda)
+// already adds the correct Access-Control-* headers and handles OPTIONS
+// preflight automatically, before this handler even runs. Don't also return
+// CORS_HEADERS here (that's for index.js/Docker, which has no such layer) —
+// combining both produces a duplicate Access-Control-Allow-Origin header,
+// which browsers reject outright ("contains multiple values ... only one is
+// allowed").
+function stripCorsHeaders(headers) {
+  const result = {};
+  for (const [key, value] of Object.entries(headers)) {
+    if (!key.toLowerCase().startsWith('access-control-')) {
+      result[key] = value;
+    }
+  }
+  return result;
+}
+
+export const handler = awslambda.streamifyResponse(async (event, responseStream) => {
   const method = event.requestContext?.http?.method || event.httpMethod || 'GET';
 
-  // CORS preflight
   if (method === 'OPTIONS') {
-    return { statusCode: 204, headers: CORS_HEADERS };
+    responseStream = awslambda.HttpResponseStream.from(responseStream, { statusCode: 204 });
+    responseStream.end();
+    return;
   }
 
   try {
@@ -28,29 +55,21 @@ export async function handler(event) {
     const rewritten = rewriteRequest(url, method, body);
     const result = await proxyToAWS(rewritten);
 
-    // Read response body
-    const chunks = [];
-    for await (const chunk of result.body) {
-      chunks.push(chunk);
-    }
-    const buffer = Buffer.concat(chunks);
-
-    // Binary responses (image frames) need base64 encoding
-    const contentType = result.headers['content-type'] || '';
-    const isBinary = !contentType.startsWith('application/json') && !contentType.startsWith('text/');
-
-    return {
+    const httpStream = awslambda.HttpResponseStream.from(responseStream, {
       statusCode: result.status,
-      headers: result.headers,
-      body: isBinary ? buffer.toString('base64') : buffer.toString('utf-8'),
-      isBase64Encoded: isBinary,
-    };
+      headers: stripCorsHeaders(result.headers),
+    });
+
+    for await (const chunk of result.body) {
+      httpStream.write(chunk);
+    }
+    httpStream.end();
   } catch (err) {
     console.error(err);
-    return {
+    const httpStream = awslambda.HttpResponseStream.from(responseStream, {
       statusCode: 500,
-      headers: { ...CORS_HEADERS, 'content-type': 'text/plain' },
-      body: 'Internal Server Error',
-    };
+      headers: { 'content-type': 'text/plain' },
+    });
+    httpStream.end('Internal Server Error');
   }
-}
+});

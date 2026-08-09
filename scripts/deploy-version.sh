@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Build one version of the viewer and publish it to its S3 prefix, then
+# invalidate that prefix's CloudFront cache. Infra (bucket, distribution)
+# must already exist — see infra/viewer/.
+#
+# Usage: scripts/deploy-version.sh <version> <bucket> <distribution-id>
+# Example: scripts/deploy-version.sh v1 genx-viewer E1AB2CD3EF4GH
+#
+# Get bucket/distribution-id from `tofu output` in infra/viewer/.
+set -euo pipefail
+
+VERSION="${1:?Usage: deploy-version.sh <version e.g. v1> <bucket> <distribution-id>}"
+BUCKET="${2:?Usage: deploy-version.sh <version> <bucket> <distribution-id>}"
+DISTRIBUTION_ID="${3:?Usage: deploy-version.sh <version> <bucket> <distribution-id>}"
+
+cd "$(dirname "$0")/.."
+
+echo "==> Building ${VERSION} (PUBLIC_URL=/${VERSION}/)"
+# Two Windows-specific gotchas, both confirmed by inspecting the actual built
+# HTML — don't "simplify" this back to a plain `yarn run build` call:
+#
+# 1. Git Bash's MSYS layer silently rewrites leading-slash env var values
+#    somewhere in the yarn -> lerna -> webpack spawn chain: PUBLIC_URL=/v1/
+#    becomes C:/Program Files/Git/v1/, and Webpack bakes that broken path
+#    into every asset URL. MSYS_NO_PATHCONV=1 does NOT fix this for the full
+#    chain (only for a process bash spawns directly) — the only reliable fix
+#    found was running the build via powershell.exe, which has no MSYS path
+#    conversion at all.
+# 2. Nx's build cache does not key on PUBLIC_URL, so a second build with a
+#    different PUBLIC_URL silently replays the previous version's cached
+#    dist/ instead of rebuilding — fatal for multi-version deploys (v2 would
+#    ship v1's bytes). --skip-nx-cache forces a real rebuild every time.
+powershell.exe -NoProfile -Command \
+  "\$env:PUBLIC_URL='/${VERSION}/'; \$env:APP_CONFIG='config/aws-healthimaging.js'; yarn run build --skip-nx-cache"
+
+DIST_DIR="platform/app/dist"
+
+echo "==> Syncing hashed assets to s3://${BUCKET}/${VERSION}/ (immutable cache)"
+aws s3 sync "$DIST_DIR" "s3://${BUCKET}/${VERSION}/" \
+  --delete \
+  --cache-control "public,max-age=31536000,immutable" \
+  --exclude "index.html" \
+  --exclude "app-config.js"
+
+echo "==> Syncing index.html / app-config.js (no-cache — these decide what loads)"
+aws s3 cp "$DIST_DIR/index.html" "s3://${BUCKET}/${VERSION}/index.html" --cache-control "no-cache"
+aws s3 cp "$DIST_DIR/app-config.js" "s3://${BUCKET}/${VERSION}/app-config.js" --cache-control "no-cache"
+
+echo "==> Invalidating CloudFront /${VERSION}/*"
+aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" --paths "/${VERSION}/*"
+
+echo "==> Done: https://<cloudfront-domain>/${VERSION}/viewer"

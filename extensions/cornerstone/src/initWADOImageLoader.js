@@ -46,7 +46,11 @@ export default function initWADOImageLoader(
       return xhrRequestHeaders;
     },
     errorInterceptor: error => {
-      errorHandler.getHTTPErrorHandler(error);
+      // getHTTPErrorHandler is a no-arg factory: it has to be called twice.
+      // Passing `error` to the factory itself dropped the interceptor on the
+      // floor, so it never ran. Optional call — the factory returns undefined
+      // when the app config defines no httpErrorHandler.
+      errorHandler.getHTTPErrorHandler()?.(error);
     },
   });
 }
