@@ -16,6 +16,26 @@
  */
 import { rewriteRequest, proxyToAWS } from './core.js';
 
+// CloudFront serves this function under /api/* on the viewer's own domain (see
+// `proxy_path_pattern` in infra/modules/viewer-site) so the browser can reach
+// it same-origin over HTTP/2. CloudFront forwards the path verbatim — origin_path
+// prepends, it never trims — so requests land here as /api/studies/... and
+// /api/datastore/.... The second shape is the one that breaks: rewriteRequest
+// only rewrites the frame path and passes everything else through untouched, so
+// /api/datastore/{id}/imageSet/{id}/getImageSetMetadata would go to AWS
+// HealthImaging verbatim and 404.
+//
+// Stripped conditionally, so the Docker/dev path (index.js, no prefix) and any
+// viewer version still calling the Function URL directly keep working unchanged.
+const PATH_PREFIX = '/api';
+
+function stripPathPrefix(path) {
+  if (path === PATH_PREFIX) {
+    return '/';
+  }
+  return path.startsWith(`${PATH_PREFIX}/`) ? path.slice(PATH_PREFIX.length) : path;
+}
+
 // The Function URL's own CORS config (infra/modules/viewer-proxy-lambda)
 // already adds the correct Access-Control-* headers and handles OPTIONS
 // preflight automatically, before this handler even runs. Don't also return
@@ -43,7 +63,7 @@ export const handler = awslambda.streamifyResponse(async (event, responseStream)
   }
 
   try {
-    const path = event.rawPath || event.path || '/';
+    const path = stripPathPrefix(event.rawPath || event.path || '/');
     const queryString = event.rawQueryString || '';
     const url = queryString ? `${path}?${queryString}` : path;
     const body = event.body

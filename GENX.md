@@ -7,13 +7,29 @@ Fork de [OHIF Viewer](https://github.com/OHIF/Viewers) configurado para conectar
 ```
 Browser (OHIF estático)
    │
-   ├── Visor: S3 + CloudFront (prod) / localhost:3000 (dev)
+   │  prod: TODO por el mismo dominio de CloudFront (same-origin)
    │
-   └── Datos: Proxy → AWS HealthImaging
-              localhost:8089 (dev) / Lambda Function URL (prod)
+   ├── /vN/*   → S3 (sitio estático)      dev: localhost:3000
+   │
+   └── /api/*  → Lambda proxy → AWS HealthImaging
+                                          dev: localhost:8089
 ```
 
 El visor es un sitio estático (HTML/JS/CSS). El proxy es un servicio Node.js que firma requests con credenciales AWS y los reenvía a HealthImaging. Un solo proxy sirve a todos los hospitales — el `datastoreID` viene en cada request.
+
+**En prod el proxy se sirve por CloudFront bajo `/api/*`, no por su Function URL.** Los Function URLs hablan HTTP/1.1, así que el navegador tenía las series capadas a 6 frames en vuelo, cada uno con round-trip propio a us-east-1; y al ser otro origen, se pagaba un preflight CORS encima. Por CloudFront hay multiplexado HTTP/2, el CORS desaparece y el salto edge→Lambda va por backbone de AWS. La Lambda recorta el prefijo `/api` (`PATH_PREFIX` en `proxy/lambda.js`) antes de reescribir la URL.
+
+Los tres sitios que tienen que decir lo mismo si se cambia el prefijo:
+
+| Qué | Dónde |
+|---|---|
+| Path pattern de CloudFront | `infra/modules/viewer-site` (`proxy_path_pattern`) |
+| Strip en la Lambda | `proxy/lambda.js` (`PATH_PREFIX`) |
+| `endpoint` / `wadoRoot` | `platform/app/public/config/aws-healthimaging-v2.js` |
+
+Contexto completo (por qué el caché está apagado, por qué OAC no aplica): [`infra/viewer/README.md`](../infra/viewer/README.md).
+
+**Versiones desplegadas:** `v1` apunta directo al Function URL (legacy, se conserva como rollback y línea base de comparación); `v2` en adelante usan `/api`. En dev no hay prefijo: el visor le pega a `localhost:8089` y `lambda.js` no interviene.
 
 ## Estructura del proyecto
 
@@ -163,15 +179,17 @@ Costo: ~$0/mes (free tier de Lambda cubre el uso típico).
 
 ### Apuntar el visor al proxy de producción
 
-En `aws-healthimaging.js`, cambiar el endpoint:
+Ruta **relativa**, no la URL del Function URL — así el request sale al mismo dominio que sirve el visor y CloudFront lo enruta al proxy (ver arquitectura arriba). Es lo que ya trae `aws-healthimaging-v2.js`:
 
 ```javascript
 healthlake: {
   datastoreID: 'TU_DATASTORE_ID',
-  endpoint: 'https://xxxxx.lambda-url.us-east-1.on.aws',
+  endpoint: '/api',
 },
-wadoRoot: 'https://xxxxx.lambda-url.us-east-1.on.aws',
+wadoRoot: '/api',
 ```
+
+`endpoint` **no puede ser `''`**: el extension lanza `endpoint is mandatory` con cualquier valor falsy al montar su override de XHR. Por eso hay prefijo y no raíz pelada.
 
 ## Cómo funciona el proxy
 
@@ -202,7 +220,7 @@ https://viewer.genx.com/viewer?StudyInstanceUIDs=...&DatastoreID=abc123
 | Favicon | `platform/app/public/assets/genx-icon.png` |
 | Título de la página | `platform/app/public/html-templates/index.html` |
 | Colores/tema | `platform/ui/tailwind.config.js` y `platform/ui/src/tailwind.css` |
-| Configuración general | `platform/app/public/config/aws-healthimaging.js` |
+| Configuración general | `platform/app/public/config/aws-healthimaging-v2.js` (v1: `aws-healthimaging.js`) |
 
 ## Actualizar desde OHIF upstream
 

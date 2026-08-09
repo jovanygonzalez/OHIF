@@ -3,19 +3,25 @@
 # invalidate that prefix's CloudFront cache. Infra (bucket, distribution)
 # must already exist — see infra/viewer/.
 #
-# Usage: scripts/deploy-version.sh <version> <bucket> <distribution-id>
+# Usage: scripts/deploy-version.sh <version> <bucket> <distribution-id> [app-config]
 # Example: scripts/deploy-version.sh v1 genx-viewer E1AB2CD3EF4GH
+#          scripts/deploy-version.sh v2 genx-viewer E1AB2CD3EF4GH config/aws-healthimaging-v2.js
+#
+# app-config defaults to the v1 config (proxy reached directly at the Lambda
+# Function URL). v2 onward pass their own variant — that's how a version picks
+# which proxy endpoint gets baked into its bundle.
 #
 # Get bucket/distribution-id from `tofu output` in infra/viewer/.
 set -euo pipefail
 
-VERSION="${1:?Usage: deploy-version.sh <version e.g. v1> <bucket> <distribution-id>}"
-BUCKET="${2:?Usage: deploy-version.sh <version> <bucket> <distribution-id>}"
-DISTRIBUTION_ID="${3:?Usage: deploy-version.sh <version> <bucket> <distribution-id>}"
+VERSION="${1:?Usage: deploy-version.sh <version e.g. v1> <bucket> <distribution-id> [app-config]}"
+BUCKET="${2:?Usage: deploy-version.sh <version> <bucket> <distribution-id> [app-config]}"
+DISTRIBUTION_ID="${3:?Usage: deploy-version.sh <version> <bucket> <distribution-id> [app-config]}"
+APP_CONFIG="${4:-config/aws-healthimaging.js}"
 
 cd "$(dirname "$0")/.."
 
-echo "==> Building ${VERSION} (PUBLIC_URL=/${VERSION}/)"
+echo "==> Building ${VERSION} (PUBLIC_URL=/${VERSION}/, APP_CONFIG=${APP_CONFIG})"
 # Two Windows-specific gotchas, both confirmed by inspecting the actual built
 # HTML — don't "simplify" this back to a plain `yarn run build` call:
 #
@@ -31,7 +37,7 @@ echo "==> Building ${VERSION} (PUBLIC_URL=/${VERSION}/)"
 #    dist/ instead of rebuilding — fatal for multi-version deploys (v2 would
 #    ship v1's bytes). --skip-nx-cache forces a real rebuild every time.
 powershell.exe -NoProfile -Command \
-  "\$env:PUBLIC_URL='/${VERSION}/'; \$env:APP_CONFIG='config/aws-healthimaging.js'; yarn run build --skip-nx-cache"
+  "\$env:PUBLIC_URL='/${VERSION}/'; \$env:APP_CONFIG='${APP_CONFIG}'; yarn run build --skip-nx-cache"
 
 DIST_DIR="platform/app/dist"
 
