@@ -10,8 +10,8 @@ de AWS HealthImaging.
 | 0 | Corregir la doc que prometía `?DatastoreID=` | ✅ Hecho |
 | 1 | Config por cliente + build/publish partidos | ✅ Hecho |
 | 2a | Distribución CloudFront por cliente | ✅ Aplicada y verificada E2E |
-| 2b | El RIS emite el enlace | ⬜ Pendiente |
-| 3 | Subir la cuota de concurrencia de Lambda | ⏸️ **Pausada** por decisión |
+| 2b | El RIS emite el enlace | ✅ Hecho ([`docs/viewers.md`](../docs/viewers.md)) |
+| 3 | Subir la cuota de concurrencia de Lambda | ✅ Hecho y medido (10 → 1000) |
 | 4 | Autorizar el proxy | ⏸️ **Pausada** por decisión |
 
 ---
@@ -196,29 +196,29 @@ sola distribución. Ahora enumera también las de cliente
 todo.** Se enumeran explícitamente en vez de un `ArnLike` sobre `distribution/*`
 para que dar de alta un cliente sea un cambio visible en el plan.
 
-## 6. Fase 2b — El RIS emite el enlace (pendiente)
+## 6. Fase 2b — El RIS emite el enlace ✅ Hecho
 
-El front emite `https://{dominio-cliente}/{version}/viewer?StudyInstanceUIDs=…`
-— sin datastore en la URL. La URL base va como `clinic_setting` (escalar, cambia
-casi nunca, se lee constantemente), que es lo que permite mover un cliente de `v3`
-a `v4`, o hacer rollback, sin tocar código de Flutter. Hoy nada en Flutter
-construye URLs del visor, así que no hay nada que romper.
+El enlace es `https://{dominio-cliente}/{version}/viewer?StudyInstanceUIDs=…` —
+sin datastore en la URL, como se diseñó.
+
+Lo que **cambió** respecto de lo que decía esta sección: la URL base **no** es un
+`clinic_setting`. Vive en `viewers.base_url`, una fila del catálogo de visores.
+La razón es que un visor resultó no ser un escalar de configuración sino una
+**entidad** —tiene id, producto, URL, estado de habilitación y una relación con
+los roles—, y el README de `clinic_settings` prohíbe explícitamente meter
+entidades ahí. Se conserva la propiedad que motivaba la idea original: mover un
+cliente de `v3` a `v4`, o hacer rollback, es cambiar una columna, sin tocar
+Flutter.
+
+Quien construye la URL es el backend (`internal/modules/viewer`), no el front:
+el mismo camino tiene que consultar la disponibilidad del pixel data y, cuando
+entren visores con token firmado, emitirlo.
+
+**Doc completa: [`docs/viewers.md`](../docs/viewers.md).**
 
 ---
 
 ## 7. Lo que queda abierto (pausado por decisión)
-
-### Fase 3 — Cuota de concurrencia de Lambda ⏸️
-
-Son **10 ejecuciones concurrentes a nivel cuenta** (`L-B99A9384`, nunca subida).
-Cada frame es una invocación: una serie de 96 frames son 96 invocaciones con
-máximo 10 en vuelo. Hoy un solo radiólogo ya roza el techo, y **la cuota se
-comparte entre todos los clientes** — una serie de uno puede dejar sin frames a
-otro. No es degradación gradual: son 429 y frames que no pintan.
-
-Sigue siendo el bloqueante real antes de tener dos clientes con tráfico. Subirla a
-1000 es una solicitud a AWS, gratis, y tarda días. Después hay que re-medir antes
-de tocar `maxNumRequests`.
 
 ### Fase 4 — Autorizar el proxy ⏸️
 
@@ -248,7 +248,40 @@ por construcción.
 
 ---
 
-## 8. Lo que NO hacer
+## 8. Rendimiento — qué se midió y qué lo movió
+
+Medido 2026-08-10 sobre un estudio real de 96 frames (CT), tres corridas por
+variante, cada una en contexto de navegador aislado y frío. Medianas tibias:
+
+| | Frames en vuelo | Fase de frames | End-to-end | Metadata por el cable |
+|---|---|---|---|---|
+| v1 (Function URL, HTTP/1.1) | 5 | 8 527 ms | 13 196 ms | 5.43 MB |
+| v3 same-origin `/api`, pool default | 5 | 10 936 ms | 15 427 ms | 5.43 MB |
+| \+ `maxNumRequests: 25` | 25 | 3 459 ms | 6 556 ms | 5.43 MB |
+| \+ metadata gzip (proxy sin undici) | 25 | **3 279 ms** | **5 646 ms** | **348 KB** |
+
+**End-to-end 13.2 s → 5.6 s (2.3×).**
+
+Tres lecciones que costaron caro re-derivar:
+
+1. **Same-origin/HTTP2 y `maxNumRequests` solo funcionan juntos.** Por separado
+   cada uno es neutro o peor: la fase 1 sola fue una regresión de 2.5 s (fila 2),
+   porque el p50 por frame *empeora* con el salto extra por el edge (353 → 470 ms)
+   y no había paralelismo que lo amortizara. Subir el pool sin same-origin chocaba
+   contra el tope de 6 conexiones de HTTP/1.1. La ganancia aparece al combinarlos.
+2. **El techo observado nunca fue el que decía la doc.** Se creía que era la cuota
+   de Lambda (10 concurrentes); medido, era el pool de cornerstone en **5**. La
+   cuota importa para varios usuarios a la vez, no para una serie.
+3. **El proxy inflaba el metadata 15.6×.** `fetch` (undici) anuncia gzip y
+   descomprime solo; AHI devuelve el metadata gzip por contrato de API. El proxy
+   descomprimía 348 KB a 5.43 MB y mandaba eso al navegador. Ver el comentario en
+   `proxy/core.js`.
+
+Lo que sigue rindiendo, por orden: **cold start** (una corrida fría dio 5 635 ms
+en `retrieve-metadatatree` vs ~900 ms tibio — le pasa al primer estudio del día),
+después `studyPrefetcher` y `maxNumberOfWebWorkers`, que siguen sin configurar.
+
+## 9. Lo que NO hacer
 
 - **Un build por cliente.** Version skew garantizado, y no compra ningún aislamiento que el config por publish no dé.
 - **Meter el slug en `PUBLIC_URL`.** Rompe el build único; va en `origin_path`.

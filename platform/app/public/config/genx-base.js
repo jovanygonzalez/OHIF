@@ -36,24 +36,29 @@ window.config = {
   showCPUFallbackMessage: true,
   showLoadingIndicator: true,
   strictZSpacingForVolumeViewport: true,
-  // NO subir `maxNumRequests` todavía. El cuello de botella real de esta
-  // arquitectura hoy NO es el transporte: es el límite de **10 ejecuciones
-  // concurrentes de Lambda** de la cuenta (quota L-B99A9384, sin subir nunca).
-  // Cada frame es una invocación, así que una serie de 96 frames son 96
-  // invocaciones y nunca puede haber más de 10 en vuelo, dé igual lo que
-  // permita HTTP/2 o cuánto se abra el pool de cornerstone.
+  // Tamaño del pool de peticiones de cornerstone. Sin configurar cae a los
+  // defaults de extensions/cornerstone/src/init.tsx (interaction 10 /
+  // thumbnail 5 / prefetch 5), y ESE era el techo real observado: una serie de
+  // 96 frames cargaba con solo **5 en vuelo**, tanto en v1 (Function URL,
+  // HTTP/1.1) como en v3 (same-origin /api por CloudFront, h2). O sea el
+  // multiplexado que compró la fase 1 no tenía nada que multiplexar.
   //
-  // Sin configurar, el pool cae a los defaults de
-  // extensions/cornerstone/src/init.tsx (interaction 10 / thumbnail 5 /
-  // prefetch 5), que ya rozan ese techo con un solo usuario. Subirlo a 60 se
-  // probó y produjo 81 throttles en una sola carga: cada throttle es un 429 y
-  // un frame que no pinta. Con dos radiólogos a la vez es peor.
+  // Historia, para no repetir el error: subirlo a 60 se probó ANTES y produjo
+  // 81 throttles en una sola carga (429 = frame que no pinta), porque la quota
+  // de Lambda de la cuenta (L-B99A9384) era de **10 ejecuciones concurrentes**
+  // y cada frame es una invocación. Esa quota ya está en **1000** (aprobada
+  // 2026-08), y en la medición de control el pico fue 7 con 0 throttles.
   //
-  // OJO multi-cliente: esa quota es de CUENTA, así que se comparte entre todos
-  // los clientes. Una serie de un cliente puede dejar sin frames a otro.
-  //
-  // Orden correcto: (1) subir la quota a 1000, (2) volver a medir, (3) recién
-  // ahí fijar este valor con datos limpios.
+  // 25 es deliberadamente conservador frente a los 60 que fallaron: cubre de
+  // sobra las 5 en vuelo actuales, y aun con 10 radiólogos simultáneos son 250
+  // invocaciones concurrentes contra un techo de 1000. OJO multi-cliente: esa
+  // quota es de CUENTA, se comparte entre todos los clientes — por eso no se
+  // abre más sin volver a medir Throttles en CloudWatch.
+  maxNumRequests: {
+    interaction: 25,
+    thumbnail: 10,
+    prefetch: 25,
+  },
   defaultDataSourceName: 'healthimaging',
   // Fetch each frame whole instead of decoding partial chunks as they stream.
   // OHIF's default (streaming + decodeLevel) assumes the server encodes HTJ2K

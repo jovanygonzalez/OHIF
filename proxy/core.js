@@ -1,4 +1,5 @@
 import aws4 from 'aws4';
+import https from 'node:https';
 
 const awsRegion = process.env.AWS_REGION || 'us-east-1';
 const awsHost = process.env.AWS_HOST || `runtime-medical-imaging.${awsRegion}.amazonaws.com`;
@@ -10,8 +11,19 @@ const CORS_HEADERS = {
   'access-control-allow-headers': '*',
 };
 
-// Node's fetch auto-decompresses, so forwarding these causes double-decode.
-const SKIP_HEADERS = new Set(['content-encoding', 'transfer-encoding', 'content-length']);
+// Hop-by-hop headers: meaningful only for the AHI->proxy connection, never to be
+// forwarded (RFC 9110 7.6.1). `content-encoding` and `content-length` are
+// deliberately NOT here — see the note on node:https in proxyToAWS.
+const SKIP_HEADERS = new Set([
+  'connection',
+  'keep-alive',
+  'proxy-authenticate',
+  'proxy-authorization',
+  'te',
+  'trailer',
+  'transfer-encoding',
+  'upgrade',
+]);
 
 /**
  * Rewrites DICOMWeb-style frame URLs to HealthImaging API paths.
@@ -40,8 +52,28 @@ export function rewriteRequest(url, method, body) {
  * Proxies a request to AWS HealthImaging, signing it with aws4.
  * In Lambda, credentials come from the execution role automatically.
  * In Docker (dev), credentials come from env vars.
+ *
+ * Uses `node:https` and NOT the global `fetch` on purpose. fetch is undici,
+ * which advertises `accept-encoding: gzip` on its own and then transparently
+ * inflates the response — and GetImageSetMetadata is gzip by API contract
+ * (the CLI reports `"contentEncoding": "gzip"`). Measured on a real study:
+ * AHI returns 347,973 bytes, undici handed us 5,428,695, and because the old
+ * SKIP_HEADERS dropped `content-encoding` we then shipped those 5.4 MB to the
+ * browser uncompressed — a 15.6x inflation on the slowest hop, in front of the
+ * first image. node:https sends no accept-encoding and decodes nothing, so the
+ * gzip AHI produced travels untouched all the way to the browser, which
+ * inflates it itself.
+ *
+ * That is also why content-length is no longer stripped: it was only ever
+ * wrong because the body had been silently decoded underneath it. Forwarding
+ * it truthfully restores real download progress in the viewer and lets
+ * CloudFront compress anything that does arrive uncompressed.
+ *
+ * Resolves with `body` as a Node Readable (an IncomingMessage), which both
+ * entry points already consume — `for await` in lambda.js, `pipeline` in
+ * index.js.
  */
-export async function proxyToAWS({ url, method, body }) {
+export function proxyToAWS({ url, method, body }) {
   // In Lambda, the execution role provides temporary credentials via env vars,
   // including a session token — without it, aws4 won't set X-Amz-Security-Token
   // and AWS rejects the signed request. Docker/local IAM users have no session
@@ -54,7 +86,6 @@ export async function proxyToAWS({ url, method, body }) {
       }
     : undefined;
 
-  const uri = `https://${awsHost}${url}`;
   const req = {
     path: url,
     service: 'medical-imaging',
@@ -68,21 +99,31 @@ export async function proxyToAWS({ url, method, body }) {
     req.headers['Content-Type'] = 'application/json';
   }
 
+  // aws4 fills in Host, X-Amz-Date, Authorization and — when there's a body —
+  // Content-Length, all of which https.request then sends verbatim.
   aws4.sign(req, credentials);
 
-  const res = await fetch(uri, {
-    method: req.method,
-    headers: req.headers,
-    body: req.body,
-  });
-
-  // Collect safe headers
-  const headers = { ...CORS_HEADERS };
-  res.headers.forEach((value, key) => {
-    if (!SKIP_HEADERS.has(key.toLowerCase())) {
-      headers[key] = value;
+  return new Promise((resolve, reject) => {
+    const upstream = https.request(
+      { host: awsHost, path: url, method: req.method, headers: req.headers },
+      res => resolve(buildResponse(url, res))
+    );
+    upstream.on('error', reject);
+    if (req.body) {
+      upstream.write(req.body);
     }
+    upstream.end();
   });
+}
+
+function buildResponse(url, res) {
+  const headers = { ...CORS_HEADERS };
+  for (const [key, value] of Object.entries(res.headers)) {
+    if (!SKIP_HEADERS.has(key.toLowerCase())) {
+      // node:https gives repeated headers as arrays; both entry points want strings.
+      headers[key] = Array.isArray(value) ? value.join(', ') : value;
+    }
+  }
 
   // HealthImaging labels frame bytes `image/jph` (HTJ2K wrapped in a JP2
   // container — correct per ISO/IEC 15444-15, but not a DICOMweb media type).
@@ -100,11 +141,11 @@ export async function proxyToAWS({ url, method, body }) {
   // path (POST .../getImageFrame, used by thumbnails).
   // Only on success: an error from AHI comes back as JSON/XML, and labelling
   // that `image/jphc` would send it to the decoder and bury the real message.
-  if (res.ok && url.endsWith('/getImageFrame')) {
+  if (res.statusCode < 400 && url.endsWith('/getImageFrame')) {
     headers['content-type'] = 'image/jphc';
   }
 
-  return { status: res.status, headers, body: res.body };
+  return { status: res.statusCode, headers, body: res };
 }
 
 export { CORS_HEADERS };

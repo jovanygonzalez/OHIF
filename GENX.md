@@ -201,6 +201,14 @@ El proxy resuelve dos problemas:
 
 2. **Reescritura de URLs**: OHIF genera URLs DICOMWeb estándar (`/studies/.../frames/1?...`), pero HealthImaging usa su propia API (`/datastore/{id}/imageSet/{id}/getImageFrame`). El proxy intercepta y reescribe automáticamente.
 
+**Usa `node:https`, no `fetch` — y no es intercambiable.** `fetch` es undici, que
+anuncia `accept-encoding: gzip` por su cuenta y descomprime la respuesta de forma
+transparente. Como `GetImageSetMetadata` viene gzip por contrato de API, el proxy
+recibía 348 KB, los inflaba a 5.43 MB y mandaba *eso* al navegador (el
+`content-encoding` se borraba para no mentir sobre un cuerpo ya decodificado). Con
+`node:https` el gzip viaja intacto hasta el navegador. Si alguien "moderniza" esto
+de vuelta a `fetch`, el metadata vuelve a pesar 15.6× más.
+
 ```
 OHIF pide:  GET /studies/{uid}/series/{uid}/.../frames/1?DatastoreID=xxx&ImageSetID=yyy&frameID=zzz
 Proxy hace: POST /datastore/xxx/imageSet/yyy/getImageFrame  { imageFrameId: "zzz" }
