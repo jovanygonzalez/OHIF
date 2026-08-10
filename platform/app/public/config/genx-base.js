@@ -59,6 +59,38 @@ window.config = {
     thumbnail: 10,
     prefetch: 25,
   },
+  // Precarga la serie en segundo plano mientras el médico mira la primera
+  // imagen. NO reduce los bytes: mueve la espera a antes de que la pidan. Es lo
+  // que arregla el "loading" imagen por imagen en la primera pasada de modo
+  // cine — medido, abrir un estudio descargaba solo 6 frames y el resto caía
+  // bajo demanda al scrollear.
+  //
+  // `displaySetsCount: 2` es el freno deliberado. Un estudio de tomosíntesis
+  // son ~356 MB; precargar TODO significaría bajarlo entero aunque el radiólogo
+  // solo mire una imagen, sobre un enlace de clínica compartido. Con 2 se
+  // precarga la serie actual y la siguiente, que es lo que se va a mirar.
+  //
+  // `maxNumPrefetchRequests: 20` queda por debajo del pool de prefetch (25,
+  // arriba) a propósito: el prefetch no debe poder llenar su bucket entero y
+  // competir con lo que el usuario está pidiendo ahora mismo.
+  studyPrefetcher: {
+    enabled: true,
+    displaySetsCount: 2,
+    maxNumPrefetchRequests: 20,
+    order: 'closest',
+  },
+  // OJO: NO copiar el 3-4 de los configs de referencia del repo — sería un
+  // downgrade. extensions/cornerstone/src/initWADOImageLoader.js calcula
+  // `Math.min(hardwareConcurrency - 1, maxNumberOfWebWorkers)`, y sin este
+  // campo eso da NaN, que es falsy, así que dicom-image-loader cae a su propio
+  // `getReasonableWorkerCount()` = **cores / 2**. En una workstation de 16
+  // núcleos eso ya son 8 workers; fijar 4 los partiría a la mitad.
+  //
+  // 8 está elegido para no ser nunca peor que ese default accidental y ser
+  // mejor en las máquinas de gama media: 16 núcleos -> 8 (igual), 8 núcleos ->
+  // 7 (antes 4), 4 núcleos -> 3 (antes 2). Importa aquí porque decodificar
+  // HTJ2K de mamografía son 6.8 MB por frame, y una serie son 82.
+  maxNumberOfWebWorkers: 8,
   defaultDataSourceName: 'healthimaging',
   // Fetch each frame whole instead of decoding partial chunks as they stream.
   // OHIF's default (streaming + decodeLevel) assumes the server encodes HTJ2K

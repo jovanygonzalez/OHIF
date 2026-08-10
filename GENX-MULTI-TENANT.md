@@ -277,9 +277,28 @@ Tres lecciones que costaron caro re-derivar:
    descomprimía 348 KB a 5.43 MB y mandaba eso al navegador. Ver el comentario en
    `proxy/core.js`.
 
-Lo que sigue rindiendo, por orden: **cold start** (una corrida fría dio 5 635 ms
-en `retrieve-metadatatree` vs ~900 ms tibio — le pasa al primer estudio del día),
-después `studyPrefetcher` y `maxNumberOfWebWorkers`, que siguen sin configurar.
+`studyPrefetcher` y `maxNumberOfWebWorkers` ya están configurados (ver
+`genx-base.js`). Dos cosas que hay que saber antes de tocarlos:
+
+- **`studyPrefetcher` NO precarga la serie que estás viendo.**
+  `_getSortedDisplaySetsToPrefetch` filtra el display set activo a propósito. De
+  la serie activa se encarga `stackContextPrefetch` de cornerstone, que ya venía
+  activo por viewport (`CornerstoneViewportService.ts:841`) con una ventana
+  deslizante de 2 antes / 2 después / +10 en la dirección del scroll. Nadie
+  precarga una serie entera de golpe por diseño.
+- **`displaySetsCount: 2` no acota el total.** Conforme termina un display set el
+  servicio re-sincroniza y avanza al siguiente, así que en la práctica termina
+  bajando el estudio completo. Medido en un estudio de tomosíntesis: **162 frames
+  / 348 MB descargados en segundo plano sin ninguna interacción** (antes de
+  activarlo: 6 frames). Eso es lo que se quiere para cine, pero significa que
+  abrir un estudio pesado consume el estudio entero aunque el médico mire una
+  sola imagen.
+
+Lo que sigue rindiendo: **cold start** (una corrida fría dio 5 635 ms en
+`retrieve-metadatatree` vs ~900 ms tibio — le pasa al primer estudio del día) y
+los **~3× de throughput** que el camino del proxy pierde frente a S3 (110 vs
+324 Mbps sobre la misma conexión, sin explicar). Subir la memoria de la Lambda a
+1024 MB se probó y **no cambia nada** — es I/O puro, no CPU.
 
 ## 9. Lo que NO hacer
 
