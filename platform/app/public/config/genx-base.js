@@ -59,22 +59,40 @@ window.config = {
     thumbnail: 10,
     prefetch: 25,
   },
-  // Precarga la serie en segundo plano mientras el médico mira la primera
-  // imagen. NO reduce los bytes: mueve la espera a antes de que la pidan. Es lo
-  // que arregla el "loading" imagen por imagen en la primera pasada de modo
-  // cine — medido, abrir un estudio descargaba solo 6 frames y el resto caía
-  // bajo demanda al scrollear.
+  // APAGADO tras una regresión medida en producción. Se deja el bloque para
+  // documentar por qué, y para que quien lo reactive lo haga con los ojos
+  // abiertos.
   //
-  // `displaySetsCount: 2` es el freno deliberado. Un estudio de tomosíntesis
-  // son ~356 MB; precargar TODO significaría bajarlo entero aunque el radiólogo
-  // solo mire una imagen, sobre un enlace de clínica compartido. Con 2 se
-  // precarga la serie actual y la siguiente, que es lo que se va a mirar.
+  // La idea era buena: precargar en segundo plano para matar el "loading"
+  // imagen por imagen en la primera pasada de modo cine. Y funciona — con
+  // `enabled: true` un estudio pasaba de descargar 6 frames a descargar los
+  // 162 (348 MB) sin que el usuario tocara nada.
   //
-  // `maxNumPrefetchRequests: 20` queda por debajo del pool de prefetch (25,
-  // arriba) a propósito: el prefetch no debe poder llenar su bucket entero y
-  // competir con lo que el usuario está pidiendo ahora mismo.
+  // El problema es CUÁNDO. El prefetcher arranca al agregarse los display sets,
+  // o sea ANTES de que la primera imagen termine de pintar, y mete 20 requests
+  // de ~2.2 MB en el cable POR DELANTE de ese primer frame. La prioridad del
+  // pool de cornerstone ordena lo que se despacha, pero no puede cancelar lo
+  // que ya va en vuelo: quedan ~44 MB encolados antes de lo que el visor
+  // necesita para mostrar algo. En un estudio de tomosíntesis de mama
+  // (2.16.840.1.113669.632.25.1.110403.20260326072833852.1: 162 frames,
+  // 348.4 MB) sobre un enlace de 93 Mbps eso dejó el spinner inicial girando
+  // casi un minuto — el visor efectivamente tenía que bajar el estudio entero
+  // antes de pintar el primer píxel.
+  //
+  // Dos correcciones a lo que se creyó al activarlo:
+  //   - `displaySetsCount: 2` NO acota el total. Avanza progresivamente hasta
+  //     traerse todos los display sets del estudio.
+  //   - El prefetcher EXCLUYE el display set activo por diseño (ver
+  //     `_getSortedDisplaySetsToPrefetch`). La serie que el usuario está
+  //     mirando ya la cubre `stackContextPrefetch` de cornerstone, que es otro
+  //     mecanismo. O sea esto nunca fue lo que arreglaba el cine.
+  //
+  // Para reactivarlo hay que resolver la competencia por el cable primero:
+  // arrancar el prefetch DESPUÉS del primer render, y mantener pocos requests
+  // en vuelo (~3) para que la cola por delante del foreground sea de cientos de
+  // ms y no de decenas de segundos.
   studyPrefetcher: {
-    enabled: true,
+    enabled: false,
     displaySetsCount: 2,
     maxNumPrefetchRequests: 20,
     order: 'closest',
