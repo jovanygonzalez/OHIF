@@ -364,6 +364,58 @@ confirma. Sigue en pie, intacto:
 Dicho de otro modo: el paso 1 no compró velocidad hoy, pero es el que deja el
 camino donde el caché puede comprarla mañana.
 
+## 10. Caché de navegador: 4.2× al reabrir un estudio (aplicado 2026-08-19)
+
+El hallazgo de §9 —el enlace es el cuello de botella— apunta a una sola salida
+real: **no volver a bajar lo que ya se bajó.** Y resultó que no se estaba
+aprovechando nada, porque **AHI no manda ninguna cabecera de caché**: ni
+`Cache-Control`, ni `ETag`, ni `Last-Modified` (verificado en las respuestas
+reales). Sin ellas el navegador no guarda nada, así que reabrir un estudio
+volvía a cruzar los 176 MB completos.
+
+El arreglo es un `aws_cloudfront_response_headers_policy` sobre el behavior
+`/datastore/*` que inyecta `Cache-Control: private, max-age=28800` (8 h).
+
+### La propiedad clave: cachea el navegador, NO el edge
+
+No es contradictorio con `Managed-CachingDisabled` — es el punto:
+
+| | ¿guarda? | consecuencia |
+|---|---|---|
+| CloudFront (caché **compartida**) | **NO** (TTL 0) | cada request de red llega a AHI, así que **el authorizer se invoca siempre** |
+| Navegador (caché **privada**) | **SÍ**, 8 h | reutiliza solo lo que ese usuario ya bajó autenticado |
+
+Eso **elimina por completo** el problema de autorización que describe §7: no
+existe una copia compartida que alguien pueda pedir sin token. `private` es
+obligatorio y no cosmético — con `public`, un proxy intermedio podría almacenar
+PHI.
+
+### Medición (misma serie, `LMLO CANOVA`, 82 instancias)
+
+| | frames | cache-hits | fase de frames | bytes por el cable | p50/frame |
+|---|---|---|---|---|---|
+| 1ª apertura | 81 | 0 | **15 907 ms** | **176.5 MB** | 3 694 ms |
+| Reapertura (página nueva) | 81 | **81** | **3 804 ms** | **0 MB** | **67 ms** |
+
+**4.2× en la fase de frames, y cero tráfico por la última milla.**
+
+Dos lecturas honestas de ese número:
+
+- **No acelera la primera apertura.** Ahí el enlace sigue mandando y los ~16 s
+  siguen ahí. Lo que ataca es el caso frecuente en radiología: volver al mismo
+  estudio dentro del turno (comparar, retomar tras una interrupción, segunda
+  lectura), y las re-descargas por desalojo del caché en memoria de cornerstone.
+- **Los 3.8 s restantes ya no son red, son decodificación** de HTJ2K en los web
+  workers. El cuello de botella se movió de sitio: bajar más de ahí exige tocar
+  `maxNumberOfWebWorkers` o la estrategia de decodificado, no la red.
+
+### La ventana de 8 h es una decisión de PHI, no técnica
+
+Un frame DICOM es inmutable (su path lleva Study/Series/SOP/frame), así que
+HTTP admitiría `max-age` de un año. Los 8 h son deliberados: una jornada, y el
+dato se purga solo del disco de la estación. Vive en
+`ahi_browser_cache_seconds` (`modules/viewer-site/variables.tf`).
+
 ## Lo que NO hacer
 
 - **Volver a v3 por el problema de rendimiento.** El rendimiento lo daba
@@ -375,8 +427,14 @@ camino donde el caché puede comprarla mañana.
   probablemente es un campo de metadata (§6).
 - **Comparar v3 y v4 en ventanas de tiempo distintas.** Mide el enlace, no la
   arquitectura (§3).
-- **Encender el caché de frames sin meter `Authorization` en la clave.** Un hit
-  no invoca al authorizer: la URL pasaría a ser la credencial (§7).
+- **Encender el caché de frames EN EL EDGE sin meter `Authorization` en la
+  clave.** Un hit no invoca al authorizer: la URL pasaría a ser la credencial
+  (§7). Ojo con no confundirlo con el caché de **navegador** de §10, que ya está
+  encendido y no tiene ese problema por ser privado.
+- **Poner `public` en ese `Cache-Control`.** Permitiría que un proxy intermedio
+  almacene PHI (§10).
+- **Subir `ahi_browser_cache_seconds` sin pensarlo.** No es un parámetro de
+  rendimiento sino de cuánto tiempo queda PHI en el disco de la estación (§10).
 - **Agregar el behavior de AHI a un solo módulo.** `viewer-site` y
   `viewer-client-site` tienen que decir lo mismo o los clientes reales se quedan
   sin la optimización, en silencio (§4).

@@ -144,7 +144,7 @@ window.config = {
   // mueven juntos o el visor deja de autenticar.
   oidc: [
     {
-      authority: 'https://removable-fantasy-minus-deleted.trycloudflare.com/realms/genx',
+      authority: 'https://prefix-mod-ash-original.trycloudflare.com/realms/genx',
       client_id: 'genx-viewer',
       redirect_uri: '/callback',
       response_type: 'code',
