@@ -1,5 +1,21 @@
 # GenX Viewer — Visor DICOM (OHIF + AWS HealthImaging)
 
+> ⚠️ **En migración a DICOMweb (rama `viewer-dicom-web`, agosto 2026).** Este
+> documento describe la arquitectura **v3**: datasource propietario
+> (`ohif-aws-healthimaging`) + proxy Lambda que firma SigV4 y traduce rutas.
+> Sigue siendo lo que corre en producción hoy.
+>
+> El `genx-base.js` del árbol **ya NO** corresponde a esa arquitectura: apunta al
+> datasource DICOMweb de stock con autenticación OIDC contra Keycloak, directo a
+> AHI y sin proxy. **No publiques ese config como v3** — va como v4.
+>
+> **Doc canónica de v4: [`GENX-DICOMWEB.md`](GENX-DICOMWEB.md)** — qué ganó y qué
+> rompió la migración, y por qué la respuesta NO es volver acá. Léelo antes de
+> tocar el config del visor o los behaviors de CloudFront.
+> Detalle de la Lambda en [`cloud-functions/ahi-oidc-authorizer/README.md`](../cloud-functions/ahi-oidc-authorizer/README.md)
+> y [`infra/modules/ahi-oidc-authorizer/README.md`](../infra/modules/ahi-oidc-authorizer/README.md).
+
+
 Fork de [OHIF Viewer](https://github.com/OHIF/Viewers) configurado para conectarse a AWS HealthImaging. Renderiza imágenes DICOM en HTJ2K directamente en el browser, sin servidor de aplicaciones.
 
 ## Arquitectura

@@ -1,5 +1,23 @@
 # GenX Viewer — Multi-cliente (compilar 1, publicar N)
 
+> ⚠️ **En migración a DICOMweb (rama `viewer-dicom-web`, agosto 2026).** Este
+> documento describe la arquitectura **v3**: datasource propietario
+> (`ohif-aws-healthimaging`) + proxy Lambda que firma SigV4 y traduce rutas.
+> Sigue siendo lo que corre en producción hoy.
+>
+> El `genx-base.js` del árbol **ya NO** corresponde a esa arquitectura: apunta al
+> datasource DICOMweb de stock con autenticación OIDC contra Keycloak, directo a
+> AHI y sin proxy. **No publiques ese config como v3** — va como v4.
+>
+> **Doc canónica de v4: [`GENX-DICOMWEB.md`](GENX-DICOMWEB.md).** Lo que sigue
+> valiendo íntegro de este documento es el diseño multi-cliente (compilar 1,
+> publicar N) y las mediciones de la §8. Lo que cambia en v4 es el datastore:
+> ya no es un campo suelto, viaja dentro de las tres raíces de DICOMweb del
+> delta de cliente.
+> Detalle de la Lambda en [`cloud-functions/ahi-oidc-authorizer/README.md`](../cloud-functions/ahi-oidc-authorizer/README.md)
+> y [`infra/modules/ahi-oidc-authorizer/README.md`](../infra/modules/ahi-oidc-authorizer/README.md).
+
+
 Cómo un mismo visor sirve a clientes distintos, cada uno con su propio datastore
 de AWS HealthImaging.
 

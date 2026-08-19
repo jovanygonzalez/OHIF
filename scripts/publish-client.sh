@@ -77,9 +77,10 @@ trap 'rm -f "$COMPOSED"' EXIT
 } > "$COMPOSED"
 
 # Ejecutar el resultado antes de subirlo: valida de una sola pasada que el delta
-# no tenga error de sintaxis y que el datastore quede realmente asignado. Se
-# pasa por stdin en vez de por ruta porque node es binario nativo de Windows y
-# MSYS reescribe las rutas POSIX de los argumentos.
+# no tenga error de sintaxis, que las raíces DICOMweb queden asignadas, y que el
+# Accept siga trayendo el transfer-syntax. Se pasa por stdin en vez de por ruta
+# porque node es binario nativo de Windows y MSYS reescribe las rutas POSIX de
+# los argumentos.
 DATASTORE=$(node -e '
   global.window = {};
   global.document = {};
@@ -91,12 +92,38 @@ DATASTORE=$(node -e '
       console.error("config inválido: " + e.message);
       process.exit(1);
     }
-    const ds = window.config?.dataSources?.[0]?.configuration?.healthlake?.datastoreID;
-    if (!ds) {
-      console.error("el delta no asignó datastoreID");
+    const cfg = window.config?.dataSources?.[0]?.configuration;
+    if (!cfg?.qidoRoot || !cfg?.wadoRoot) {
+      console.error("el delta no asignó qidoRoot/wadoRoot");
       process.exit(1);
     }
-    process.stdout.write(ds);
+
+    // Gate del Accept. Sin el transfer-syntax, AHI transcodifica cada frame a
+    // ELE: 7x los bytes, con HTTP 200 y sin un solo error en consola. Es un
+    // fallo que NO se ve en un smoke test — solo se siente lento — así que se
+    // corta acá, que es el único punto por el que pasa todo lo que se publica.
+    const accept = cfg.acceptHeader?.[0] ?? "";
+    // El caso entrecomillado se revisa PRIMERO: si no, cae en el mensaje de
+    // abajo, que diría "sin transfer-syntax" cuando en realidad sí lo trae y el
+    // problema son las comillas. Un diagnóstico equivocado cuesta más que
+    // ninguno.
+    if (/transfer-syntax="/.test(accept)) {
+      console.error(
+        "acceptHeader entrecomilla el transfer-syntax: AHI responde 400. " +
+        "Quitar las comillas (las de type= sí las acepta). Valor actual: " + accept
+      );
+      process.exit(1);
+    }
+    if (!/transfer-syntax=1\.2\.840\.10008\.1\.2\.4\.20[23]/.test(accept)) {
+      console.error(
+        "acceptHeader sin transfer-syntax de HTJ2K: los frames volverían " +
+        "descomprimidos (~7x). Valor actual: " + (accept || "(vacío)")
+      );
+      process.exit(1);
+    }
+
+    const m = /\/datastore\/([0-9a-f]{32})/.exec(cfg.qidoRoot);
+    process.stdout.write(m ? m[1] : "(no reconocido en la URL)");
   });
 ' < "$COMPOSED") || {
   echo "ERROR: ${CLIENT_CONFIG} no produce un config publicable (ver arriba)." >&2
