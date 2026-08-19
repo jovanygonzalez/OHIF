@@ -8,9 +8,10 @@ y cómo se cierra.
 > verificado E2E en navegador** — behavior `/datastore/*` en las dos
 > distribuciones, config del cliente en raíz relativa, v4 republicado, y un
 > estudio real abriéndose completamente same-origin, sobre h2, sin un solo
-> preflight. Falta el **paso 2: medir**, que ahora importa más de lo previsto
-> (ver la corrección sobre HTTP/2 en §3). **v3 sigue desplegado y sin tocar**,
-> sirviéndose por `/api/*`.
+> preflight. **Paso 2 (medir) también hecho, y el resultado es un empate:** v3 y
+> v4 rinden igual porque el enlace de la clínica está saturado — ver §9 antes de
+> sacar conclusiones de rendimiento de este documento. **v3 sigue desplegado y
+> sin tocar**, sirviéndose por `/api/*`.
 
 Documentos hermanos:
 [`GENX.md`](GENX.md) (arquitectura v3) ·
@@ -302,13 +303,66 @@ con 401. Detalle completo en el README del authorizer.
    | CloudFront reenvía el JWT | frames y metadata en 200 con `authorization: Bearer …`; sin él, `Missing Authentication Token`; con uno basura, `Invalid or Expired token` — **idéntico a AHI directo** |
    | El `acceptHeader` sobrevive el salto | request y respuesta con `type="image/jphc"; transfer-syntax=…4.202`; frame de 2.3 MB, **no** los ~20 MB de ELE |
    | La imagen pinta | mamografía monocroma correcta |
-2. **Medir v3 vs v4 alternado** (§3). Si el end-to-end no vuelve al rango de los
-   5.6 s, hay algo más y hay que encontrarlo antes de seguir.
+2. ✅ **Medido** (2026-08-19) — ver §9. Resultado incómodo pero claro: **v3 y v4
+   son indistinguibles en este enlace**, porque el enlace es el cuello de
+   botella. La justificación de v4 es estructural, no de velocidad.
 3. **El verde**, empezando por abrir el ultrasonido en v3 (§6).
 4. **Keycloak público estable** (§8) — en paralelo, es el gate de producción.
 5. *(Después, opcional y grande)* **Caché de frames en el edge** (§7).
 
 ---
+
+## 9. La medición (2026-08-19) — v3 y v4 empatan, y por qué
+
+Mismo estudio, misma serie (`LMLO CANOVA`, 82 instancias), mismo navegador, misma
+distribución de CloudFront, corridas alternadas dentro de la misma ventana, y
+**las dos medidas con el mismo método** (trace de DevTools → eventos
+`ResourceSendRequest`/`ResourceFinish`, que es el único que ve los frames:
+cornerstone los descarga dentro de Web Workers y un hook del hilo principal no
+los captura).
+
+| | frames | fase de frames | datos | p50/frame | p95/frame | throughput | 1er frame | proto |
+|---|---|---|---|---|---|---|---|---|
+| **v3** (proxy `/api`) | 81 | 15 196 ms | 176.5 MB | 3 828 ms | 4 655 ms | **97.4 Mbps** | 781 ms | h2 |
+| **v4** (CloudFront→AHI) | 81 | 15 699 ms | 176.5 MB | 3 733 ms | 4 770 ms | **94.3 Mbps** | 941 ms | h2 |
+
+**Diferencia: ~3%. Es ruido.**
+
+### Por qué empatan: el enlace está saturado
+
+176.5 MB en ~15.2 s son ~97 Mbps, y ese es justamente el techo del enlace de la
+clínica (el doc de v3 ya citaba "un enlace de 93 Mbps"). **Esta carga de trabajo
+es throughput-bound**, y lo que compra CloudFront —eliminar un preflight por URL,
+terminar TLS cerca— son ganancias de **latencia**. Cuando el cuello de botella es
+el ancho de banda, esas ganancias no aparecen en el cronómetro.
+
+Tres consecuencias que conviene no olvidar:
+
+- **La regresión que motivó todo este paso probablemente nunca fue medible en
+  este enlace.** El "v4 se siente más lento" que arrancó el análisis no se
+  reproduce con números.
+- **El 3× de throughput que el doc de v3 le atribuía al proxy tampoco se
+  reproduce.** v3 dio 97.4 Mbps, v4 94.3 — el proxy no era un cuello de botella
+  de ancho de banda acá.
+- **CloudFront seguiría importando donde la latencia domina**: enlaces rápidos
+  lejos de us-east-1, estudios de pocos frames, y el tiempo hasta la primera
+  imagen. Esta medición no cubre ese caso.
+
+### Lo que esto NO cambia
+
+La razón para preferir v4 **nunca debió ser la velocidad**, y esta medición lo
+confirma. Sigue en pie, intacto:
+
+- v3 gasta **una invocación de Lambda por frame** contra una quota de **1000 de
+  cuenta compartida entre clientes** — ~40 radiólogos simultáneos la saturan (§2).
+- v3 expone un Function URL **público y sin autenticar** cuyo rol lee cualquier
+  datastore de la cuenta.
+- v3 arrastra un extension propietario y un proxy que traduce rutas.
+- Solo v4 hace viable el caché de frames en el edge (§7), que **sí** atacaría el
+  techo del enlace — sirviendo desde el POP en vez de cruzar a us-east-1.
+
+Dicho de otro modo: el paso 1 no compró velocidad hoy, pero es el que deja el
+camino donde el caché puede comprarla mañana.
 
 ## Lo que NO hacer
 
