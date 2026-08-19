@@ -373,8 +373,67 @@ aprovechando nada, porque **AHI no manda ninguna cabecera de caché**: ni
 reales). Sin ellas el navegador no guarda nada, así que reabrir un estudio
 volvía a cruzar los 176 MB completos.
 
-El arreglo es un `aws_cloudfront_response_headers_policy` sobre el behavior
-`/datastore/*` que inyecta `Cache-Control: private, max-age=28800` (8 h).
+### Qué se cachea, y por qué NO todo (la parte que importa)
+
+**Solo los píxeles son inmutables.** Un SOP Instance UID identifica una instancia
+única en DICOM: cambiar los píxeles obliga a emitir un UID nuevo, o sea otra URL.
+Un frame se puede cachear sin miedo.
+
+Todo lo demás bajo `/datastore/*` es **mutable sobre la misma URL**, y cachearlo
+produce fallos que se leen como errores clínicos, no como bugs de caché:
+
+| Si pasa esto… | …se refleja en | Cacheado sería |
+|---|---|---|
+| Se agrega un **DICOM SR** al estudio | QIDO `/series` | el informe nuevo **no aparece** |
+| Se **corrige el nombre del paciente** (AHI lo edita in-place, sin cambiar UIDs) | `/metadata` | el médico que reabre **para verificar la corrección** sigue viendo el nombre viejo |
+| Se **borra** una instancia | QIDO `/series` | sigue listándose |
+
+Por eso hay **dos behaviors y dos policies**, y el de frames va **primero**
+(CloudFront evalúa en orden y gana el primero que casa; invertirlos deja el
+bloque de frames muerto y vuelve a cachear metadata):
+
+| Path pattern | Cache-Control | Motivo |
+|---|---|---|
+| `/datastore/*/frames/*` | `private, max-age=28800` | píxeles, inmutables |
+| `/datastore/*` (QIDO, metadata) | `no-store` | mutables sobre la misma URL |
+
+La invariante que queda: **la vista de "qué existe y cómo se llama" siempre es
+fresca; el caché solo acelera "los bytes de algo que sigue existiendo y está
+nombrado por un UID inmutable".**
+
+Verificado en un contexto de navegador aislado (caché vacía), reabriendo el
+estudio:
+
+| | requests | de caché | por red |
+|---|---|---|---|
+| QIDO | 3 | **0** | **3** |
+| `/metadata` | 3 | **0** | **3** |
+| frames | 6 | **6** | 0 |
+
+**Límite conocido:** si alguien reimporta píxeles distintos reusando el mismo SOP
+Instance UID (violación de DICOM), el frame cacheado queda viejo hasta 8 h.
+
+### Anotaciones, KO y SR: el caché ya los cubre
+
+Un KO, un SR de mediciones o una flecha (GSPS) que guarde un médico son
+**instancias nuevas con SOP Instance UID nuevo**, en una serie nueva. Otro médico
+que refresque los ve al instante: QIDO y `/metadata` van por red siempre.
+
+El frame original **no cambia de UID** —la flecha se guarda aparte y el visor la
+superpone, no la quema en los píxeles—, así que su copia cacheada sigue siendo
+correcta. Y si alguien sí quemara la anotación en los píxeles, sería otra
+instancia con otro UID, o sea otra URL. **El caché aguanta los dos casos por la
+misma razón: solo cachea lo direccionado por un UID inmutable.**
+
+> ⚠️ **Escribir de vuelta (STOW-RS) hoy NO funciona, y el error miente.** Hay
+> tres bloqueos independientes: el visor no tiene `stowRoot`/`dicomUploadEnabled`
+> configurados; el rol de federación es `DicomWebReadOnly`; y los behaviors de
+> `/datastore/*` solo permiten `GET/HEAD/OPTIONS`, así que **un POST devuelve 403
+> emitido por CloudFront** (`Server: CloudFront`), no por AHI. Ese 403 se lee
+> igual que un problema de permisos y manda a depurar el authorizer o el IAM, que
+> son el lugar equivocado. AHI sí expone la ruta POST `/studies`. Habilitar
+> anotaciones persistentes son tres cambios coordinados: `allowed_methods`, el
+> rol IAM, y el config del visor.
 
 ### La propiedad clave: cachea el navegador, NO el edge
 
@@ -433,6 +492,15 @@ dato se purga solo del disco de la estación. Vive en
   encendido y no tiene ese problema por ser privado.
 - **Poner `public` en ese `Cache-Control`.** Permitiría que un proxy intermedio
   almacene PHI (§10).
+- **Aplicar el `Cache-Control` de frames a todo `/datastore/*`.** Se intentó y se
+  revirtió el mismo día: cachea también QIDO y `/metadata`, que son mutables, y
+  entonces un DICOM SR agregado no aparece y un nombre de paciente corregido
+  sigue mostrándose mal hasta 8 h (§10). Y ojo: **`no-store` no desaloja lo ya
+  guardado** — quien haya cargado el visor durante una ventana mal configurada
+  se queda con metadata viejo hasta que expire, y necesita limpiar caché.
+- **Declarar el behavior de `/datastore/*` antes que el de
+  `/datastore/*/frames/*`.** Gana el primero que casa: el de frames quedaría
+  muerto y volvería el problema anterior (§10).
 - **Subir `ahi_browser_cache_seconds` sin pensarlo.** No es un parámetro de
   rendimiento sino de cuánto tiempo queda PHI en el disco de la estación (§10).
 - **Agregar el behavior de AHI a un solo módulo.** `viewer-site` y
