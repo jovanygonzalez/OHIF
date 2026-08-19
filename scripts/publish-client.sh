@@ -98,6 +98,27 @@ DATASTORE=$(node -e '
       process.exit(1);
     }
 
+    // Gate del issuer. El base ya no lo hornea (es específico del entorno), y
+    // sin él getUserManagerForOpenIdConnectClient() devuelve undefined: el
+    // visor se publicaría SIN autenticación, avisando con un solo
+    // console.error que nadie mira. Se corta acá igual que el Accept.
+    const authority = window.config?.oidc?.[0]?.authority;
+    if (!authority) {
+      console.error("el delta no asignó oidc[0].authority: se publicaría un visor SIN autenticación");
+      process.exit(1);
+    }
+    // Las dos trampas reales al mover el issuer entre entornos: la barra final
+    // y el http. `iss` de Keycloak no lleva barra, y oidc-client-ts compara la
+    // cadena tal cual — falla con "Invalid issuer in token response", que no
+    // menciona la barra por ningún lado.
+    if (!/^https:\/\//.test(authority) || /\/$/.test(authority)) {
+      console.error(
+        "oidc[0].authority debe ser https y SIN barra final (el claim `iss` no la lleva). " +
+        "Valor actual: " + authority
+      );
+      process.exit(1);
+    }
+
     // Gate del Accept. Sin el transfer-syntax, AHI transcodifica cada frame a
     // ELE: 7x los bytes, con HTTP 200 y sin un solo error en consola. Es un
     // fallo que NO se ve en un smoke test — solo se siente lento — así que se
@@ -123,15 +144,19 @@ DATASTORE=$(node -e '
     }
 
     const m = /\/datastore\/([0-9a-f]{32})/.exec(cfg.qidoRoot);
-    process.stdout.write(m ? m[1] : "(no reconocido en la URL)");
+    process.stdout.write((m ? m[1] : "(no reconocido en la URL)") + "	" + authority);
   });
 ' < "$COMPOSED") || {
   echo "ERROR: ${CLIENT_CONFIG} no produce un config publicable (ver arriba)." >&2
   exit 1
 }
 
+AUTHORITY="${DATASTORE#*$'	'}"
+DATASTORE="${DATASTORE%%$'	'*}"
+
 echo "==> Publicando ${SLUG} / ${VERSION}"
 echo "    datastore : ${DATASTORE}"
+echo "    keycloak  : ${AUTHORITY}"
 echo "    destino   : ${S3_PREFIX}/"
 echo
 

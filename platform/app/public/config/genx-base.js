@@ -139,12 +139,23 @@ window.config = {
   // OpenIdConnectRoutes.tsx:109), no el id_token. Es lo correcto: AHI exige un
   // JWT y el access token de Keycloak lo es.
   //
-  // `authority` tiene que coincidir EXACTO con el claim `iss` que emite
-  // Keycloak, y con `oidc_issuer` del authorizer en infra/viewer. Los tres se
-  // mueven juntos o el visor deja de autenticar.
+  // `authority` LA DEFINE EL DELTA DEL CLIENTE — config/clients/{slug}.js.
+  // Es específica del ENTORNO (QA y producción tienen Keycloak distintos) y el
+  // base es client-agnostic, igual que las tres raíces DICOMweb de abajo:
+  // hornearla aquí obligaría a compilar una vez por entorno, que es justo lo
+  // que el reparto base+delta existe para evitar.
+  //
+  // Tiene que coincidir EXACTO con el claim `iss` que emite Keycloak y con
+  // `oidc_issuer` del authorizer en infra/viewer. Es la ÚNICA cadena que hay
+  // que configurar: `oidc-client-ts` descubre authorize, token y JWKS solo,
+  // pidiendo {authority}/.well-known/openid-configuration.
+  //
+  // publish-client.sh corta la publicación si el delta no la asigna. Sin ella
+  // getUserManagerForOpenIdConnectClient() devuelve undefined y el visor
+  // arranca SIN autenticación, avisando con un único console.error.
   oidc: [
     {
-      authority: 'https://prefix-mod-ash-original.trycloudflare.com/realms/genx',
+      authority: null,
       client_id: 'genx-viewer',
       redirect_uri: '/callback',
       response_type: 'code',

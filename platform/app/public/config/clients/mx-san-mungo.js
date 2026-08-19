@@ -43,6 +43,26 @@
   });
 })();
 
+// Keycloak de ESTE entorno. Vive en el delta y no en el base porque es lo
+// único que cambia entre QA y producción: con el mismo build publicado dos
+// veces, cada sitio apunta a su propio realm.
+//
+// Las dos reglas al moverla:
+//
+//   1. Tiene que ser IDÉNTICA al claim `iss` que emite Keycloak. Ni barra
+//      final de más, ni http donde el token dice https — `oidc-client-ts`
+//      compara la cadena y falla con "Invalid issuer in token response".
+//   2. El mismo valor va en `oidc_issuer` de infra/viewer/terraform.tfvars.
+//      El authorizer de AHI deriva de ahí su JWKS
+//      ({issuer}/protocol/openid-connect/certs, index.js:20), así que si los
+//      dos se separan el visor autentica pero AHI devuelve 403 en cada frame
+//      — y el CloudWatch del authorizer sale VACÍO, que despista mucho.
+//
+// El navegador solo necesita esta cadena: el resto (authorize, token, JWKS) lo
+// descubre pidiendo {authority}/.well-known/openid-configuration.
+window.config.oidc[0].authority =
+  'https://prefix-mod-ash-original.trycloudflare.com/realms/genx';
+
 // El título va horneado en index.html en tiempo de build, así que para que sea
 // por cliente hay que pisarlo aquí (esto corre antes de que monte React).
 document.title = 'San Mungo — Visor';
