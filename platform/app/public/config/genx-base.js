@@ -174,7 +174,13 @@ window.config = {
   whiteLabeling: {
     createLogoComponentFn: function (React) {
       return React.createElement('img', {
-        src: './assets/genx-logo.png',
+        // Absoluta desde PUBLIC_URL, igual que `routerBasename` arriba.
+        // Relativa NO sirve: en la LISTA de estudios la URL es '/v4' (sin
+        // barra final), asi que './assets/...' resuelve a '/assets/...'
+        // —fuera del prefijo de version— y CloudFront responde 403. Dentro
+        // del visor ('/v4/viewer') si resolvia bien, por eso el 403 solo
+        // aparecia en la lista y parecia intermitente.
+        src: (window.PUBLIC_URL || '/').replace(/\/?$/, '/') + 'assets/genx-logo.png',
         alt: 'GenX RIS',
         style: { height: '20px', marginLeft: '10px' },
       });
