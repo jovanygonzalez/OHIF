@@ -163,6 +163,10 @@ function App({
         oidc={oidc}
         routerBasename={routerBasename}
         userAuthenticationService={userAuthenticationService}
+        // [genx] Con qué avisar cuando la sesión se degrada. El componente se
+        // monta dentro de CombinedProviders, así que NotificationProvider ya
+        // tiene puesta la implementación de este servicio.
+        uiNotificationService={uiNotificationService}
       />
     );
   }

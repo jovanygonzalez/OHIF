@@ -178,8 +178,20 @@ window.config = {
   // without a guard (e.g. extensions/cornerstone init.tsx on IMAGE_LOAD_FAILED).
   // Leaving it undefined turns every failed image load into
   // "getHTTPErrorHandler(...) is not a function", masking the real error.
+  //
+  // Además de loguear, le pasa el fallo a la capa de sesión. `window.genxSession`
+  // lo publica OpenIdConnectRoutes.tsx mientras está montado; es la ÚNICA costura
+  // posible porque este archivo es config plana que se carga antes del bundle y
+  // no puede importar nada. Si no está (arranque, o build sin OIDC), esto sigue
+  // siendo solo el console.error de siempre.
+  //
+  // Por qué importa: un token vigente puede ser rechazado igual por AHI (deriva
+  // de reloj en `iat`, `aud` que no coincide, authorizer mal apuntado), y ese
+  // caso NO emite ningún evento de oidc-client-ts. Sin este aviso el síntoma es
+  // el de siempre: imágenes rotas y nada en pantalla.
   httpErrorHandler: error => {
     console.error('[genx] HealthImaging request failed', error?.status ?? '', error);
+    window.genxSession?.reportHttpError?.(error);
   },
   // Branding por defecto. Un cliente puede pisarlo desde su delta.
   whiteLabeling: {
