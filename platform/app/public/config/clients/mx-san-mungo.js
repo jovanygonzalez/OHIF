@@ -60,8 +60,7 @@
 //
 // El navegador solo necesita esta cadena: el resto (authorize, token, JWKS) lo
 // descubre pidiendo {authority}/.well-known/openid-configuration.
-window.config.oidc[0].authority =
-  'https://prefix-mod-ash-original.trycloudflare.com/realms/genx';
+window.config.oidc[0].authority = 'https://auth.genx.mx/realms/genx';
 
 // El título va horneado en index.html en tiempo de build, así que para que sea
 // por cliente hay que pisarlo aquí (esto corre antes de que monte React).
