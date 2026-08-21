@@ -1,10 +1,13 @@
 # Autenticación y sesión del visor
 
-> **Estado (21-ago-2026):** diagnóstico **revisado y corregido contra el código**.
-> Fases 0, 1 y 2 **completas**. Keycloak vive en un hostname público estable
-> (`https://auth.genx.mx`) servido por un túnel que ya corre como servicio de
-> Windows, y el botón "Ver estudio" abre **v4**. La Fase 3 —migrar la app a
-> *authorization code*— está desbloqueada y es lo único que queda.
+> **Estado (21-ago-2026):** Fases 0, 1 y 2 **completas**. Keycloak vive en un
+> hostname público estable (`https://auth.genx.mx`) servido por un túnel que corre
+> como servicio de Windows, y el botón "Ver estudio" abre **v4**.
+>
+> **La Fase 3 ya autentica por *authorization code + PKCE***: el navegador visita
+> Keycloak, así que la cookie SSO existe y el visor entra sin formulario. Quedan
+> tres remates —logout real, desbloqueo por ventana emergente, y retirar las
+> exenciones de JWT que quedaron huérfanas— listados en la tabla de abajo.
 >
 > **Objetivo:** que abrir un estudio desde la app de GenX **no vuelva a pedir
 > login**, y que cuando la sesión del visor se degrade el visor **lo diga**, en
@@ -37,8 +40,9 @@ Keycloak), [`GENX-MULTI-TENANT.md`](GENX-MULTI-TENANT.md) (compilar 1, publicar 
 | **Fase 3 · Cliente `genx-app` en Keycloak** | ✅ 21-ago-2026. Público + PKCE `S256`, sin `directAccessGrants`. En el realm vivo **y** en `genx-realm.json`. Verificado contra `/authorize` por el issuer público |
 | **Fase 3 · La app apunta al issuer público** | ✅ 21-ago-2026. `KEYCLOAK_URL` en los 4 `config/env.*.json` → `https://auth.genx.mx` (antes `localhost:8180`, que habría dejado la cookie SSO en el host equivocado) |
 | **Fase 3 · RPC `GetMySession`** | ✅ 21-ago-2026. Probado en runtime, **incluido el upsert**: un usuario que solo existía en Keycloak obtuvo su fila en `users` sin pasar por `Login` |
-| **Fase 3 · App a authorization code + PKCE** | ⬜ pendiente. Solo web (no hay build de Windows en uso) |
-| **Fase 3 · `logout` que revoque en Keycloak** | ⬜ pendiente, va con la Fase 3 |
+| **Fase 3 · App a authorization code + PKCE** | ✅ 21-ago-2026. `oidc_client.dart` (PKCE S256 a mano, cero dependencias nuevas), ruta `/auth/callback`, refresh contra Keycloak. Solo web |
+| **Fase 3 · `logout` que revoque en Keycloak** | ⬜ pendiente, siguiente paso. `OidcClient.endSessionUri` ya está escrito |
+| **Fase 3 · Desbloqueo por ventana emergente** | ⬜ pendiente. Hoy desbloquea con `prompt=login` **por redirect**, que recarga la app |
 | **Fase 3 · Retirar exenciones de `Login`/`RefreshToken`** | ⬜ pendiente. Dos listas que se mueven juntas: `auth.go` y `envoy.yaml` |
 
 ⚠️ El cableado de la Fase 1 **sí se observó en runtime** el 20-ago-2026 (así se
@@ -46,10 +50,10 @@ descubrió que el 403 del authorizer no significa lo que parecía — §5, hueco
 Lo que **no** se ha vuelto a observar es la versión **ya corregida**, la que
 pregunta por `expires_at` en vez de por el status. Procedimiento en §8.
 
-Con el hueco 6 cerrado, lo que la Fase 3 sigue aportando es el **primer** login
-del día: hoy, la primera vez que alguien abre el visor tras expirar la sesión SSO
-ve el formulario de Keycloak aunque ya esté dentro de la app. Eso solo lo quita
-el authorization code en la app.
+Lo que la Fase 3 aportó, ahora que el hueco 6 ya estaba cerrado, es el **primer**
+login del día: antes, la primera vez que alguien abría el visor tras expirar la
+sesión SSO veía el formulario de Keycloak aunque ya estuviera dentro de la app.
+Se pasó de **dos logins a uno**, y ese uno se lo lleva la app.
 
 ---
 
@@ -60,18 +64,25 @@ Eso por sí solo no es un problema: es normal que cada app sea su propio cliente
 OIDC. Lo que rompe la experiencia es que **no hay sesión compartida donde debería
 haberla**.
 
-La app de GenX autentica por **ROPC** (*Resource Owner Password Credentials*): el
-usuario teclea sus credenciales en Flutter, viajan por gRPC al backend, y **Go**
-las cambia con Keycloak servidor-a-servidor.
+> **Esta sección describe el problema ORIGINAL, resuelto el 21-ago-2026.** Se
+> conserva porque explica por qué el sistema está armado como está, y porque el
+> diagnóstico equivocado ("es configuración del visor", "es por estar en internet
+> abierto") reaparece cada vez que alguien mira esto de nuevo. Lo que hay HOY
+> está en la Fase 3 de la §6.
+
+La app de GenX autenticaba por **ROPC** (*Resource Owner Password Credentials*):
+el usuario tecleaba sus credenciales en Flutter, viajaban por gRPC al backend, y
+**Go** las cambiaba con Keycloak servidor-a-servidor.
 
 ```go
 // api/internal/modules/user/service/user_service.go:975
 token, err := s.keycloakClient.Login(ctx, s.clientID, s.clientSecret, s.realm, username, password)
 ```
 
-**El navegador nunca visita Keycloak.** Por lo tanto Keycloak nunca deja su cookie
-de sesión SSO. Cuando el visor arranca y redirige a Keycloak para autenticarse,
-Keycloak —con toda razón— no sabe quién es ese navegador, y muestra el formulario.
+**El navegador nunca visitaba Keycloak.** Por lo tanto Keycloak nunca dejaba su
+cookie de sesión SSO. Cuando el visor arrancaba y redirigía a Keycloak para
+autenticarse, Keycloak —con toda razón— no sabía quién era ese navegador, y
+mostraba el formulario.
 
 Dos clientes OIDC independientes + ninguna sesión de navegador = **dos logins**.
 
@@ -101,7 +112,7 @@ inferido. Las incógnitas que quedan están en §10.
 
 | Hecho | Dónde | Valor |
 |---|---|---|
-| Login de la app = ROPC | `api/…/user_service.go:975` | `keycloakClient.Login(...)` → password grant |
+| ~~Login de la app = ROPC~~ | — | **Ya no.** Desde el 21-ago-2026 la app usa *authorization code + PKCE* con el cliente `genx-app`. `UserService.Login` sigue existiendo en el backend pero la app no lo llama |
 | Login del agente DICOM | `api/…/user_service.go:1054` | `GrantType: "password"` + scope `offline_access`. **Correcto para un cliente headless — NO tocar** |
 | Cliente del backend | `api/.env` | `KEYCLOAK_CLIENT_ID=genx-api` |
 | **`genx-api` en Keycloak** | realm `genx` | confidencial, `standardFlow=false`, `directAccessGrants=true`, sin PKCE → **hoy es incapaz de hacer authorization code** |
@@ -159,11 +170,12 @@ Beneficios que justifican el trabajo por sí solos, aparte del login único:
 
 ## 5. Los huecos, revisados
 
-### Hueco 1 — No existe sesión SSO (causa del prompt) · **ABIERTO**
+### Hueco 1 — No existe sesión SSO (causa del prompt) · **CERRADO** (21-ago-2026)
 
-La app debe autenticar por **authorization code en el navegador** en vez de ROPC.
-Es el único cambio estructural, y es el que crea la sesión que el visor luego
-encuentra. Ver Fase 3.
+Era el único cambio estructural de todo el documento: la app autentica por
+**authorization code en el navegador**, así que el navegador **sí** visita
+Keycloak y se lleva su cookie SSO — la que el visor encuentra después. Ver Fase 3
+en la sección 6 para cómo quedó.
 
 ### Hueco 2 — ~~La renovación cuelga de un iframe~~ · **NO EXISTE**
 
@@ -413,7 +425,11 @@ repo dice:
 curl -s https://<dominio>/v4/app-config.js | grep -o "'https://[^']*realms/genx'"
 ```
 
-### ⬜ Fase 3 — App de GenX a authorization code
+### 🟡 Fase 3 — App de GenX a authorization code · CASI
+
+El login ya va por *authorization code + PKCE*. Quedan tres cosas, todas listadas
+en la tabla de la sección 0: el `logout` que revoque de verdad, el desbloqueo por
+ventana emergente, y retirar las exenciones de JWT que quedaron huérfanas.
 
 **Solo web.** Existe `app/windows/` pero no hay build de Windows en uso, así que
 no se adopta un paquete OIDC multiplataforma: code + PKCE contra Keycloak son
@@ -509,6 +525,49 @@ Verificado en runtime, no solo compilado:
   `GatewayLogin` siguen devolviendo lo mismo, y el gateway conserva su
   `refresh_expires_in = 0` (sesión offline).
 
+#### ✅ El flujo en el front · HECHO (21-ago-2026)
+
+**Cero dependencias nuevas.** Contra Keycloak esto son dos POST y un redirect;
+un paquete OIDC habría traído su propio modelo de sesión que habría que
+reconciliar con `AuthStorage`, `GrpcService` y el bloqueo por inactividad — más
+código, no menos. Solo se declaró `crypto`, que ya entraba como transitiva.
+
+| Archivo | Qué cambió |
+|---|---|
+| `features/auth/infrastructure/oidc_client.dart` | **Nuevo.** PKCE S256, `state`, canje, refresh, `endSessionUri`. `verifier`/`state` en `sessionStorage` (mueren con la pestaña; dos pestañas autenticando no se pisan) |
+| `features/auth/presentation/screens/auth_callback_screen.dart` | **Nuevo.** Ruta `/auth/callback`, registrada **sin** `AuthMiddleware` |
+| `grpc_auth_repository.dart` | Une las dos mitades: tokens de Keycloak + `GetMySession` del backend |
+| `auth_notifier.dart` | `login(user,pass)` → `beginLogin()` + `completeLoginFromCallback()` |
+| `login_screen.dart` / `lock_screen.dart` | Sin campos de contraseña. Portada + botón |
+| `grpc_service.dart` | `_executeRefresh` va a Keycloak; `login`/`refreshToken` fuera; `getMySession` dentro |
+
+Cuatro decisiones que no se deducen del código:
+
+1. **El callback lo resuelve la PANTALLA, no `checkAuthStatus`.** Si el canje
+   viviera en el notifier, un `state` inválido o un backend caído terminarían en
+   un redirect mudo a la pantalla de login. `checkAuthStatus` detecta que
+   estamos en el callback y **se aparta** dejando el estado en `loading` — si
+   resolviera a `unauthenticated`, el listener de navegación saltaría a login y
+   se llevaría el `code` de la URL en el camino.
+2. **Al fallar el callback el estado queda en `error`, no en `unauthenticated`.**
+   Por lo mismo: `unauthenticated` navega a login y desmonta la pantalla que
+   está mostrando el mensaje. En `error` nadie navega y el usuario ve qué pasó
+   donde pasó.
+3. **`Get.currentRoute` trae el query string** en esa ruta
+   (`/auth/callback?code=…`), así que la comparación del listener es
+   `startsWith`, no `==`. Con `==` el usuario se queda mirando el spinner con la
+   sesión ya establecida.
+4. **`nonce` se manda pero no se valida**, y es deliberado: en code flow el
+   `id_token` llega por el canal directo del token endpoint (TLS + PKCE +
+   `state`), no por la barra de direcciones, así que el replay del front channel
+   que `nonce` previene no aplica. OIDC Core lo marca OPCIONAL para este flujo.
+
+De paso se arregló un bug que este cambio empeoraba: **"Cerrar sesión" del menú
+de usuario nunca llamaba a `logout()`** (`user_menu_popup.dart`), solo navegaba a
+login. Antes eso dejaba tokens vivos; con SSO además la cookie de Keycloak sigue
+en pie, así que pulsar "Entrar" volvía a entrar **sin preguntar nada** — o sea
+que no cerraba nada y encima lo disimulaba.
+
 Tres cosas más que hay que resolver dentro de esta fase y no después:
 
 1. **El "Salir" debe cerrar de verdad.** Hoy `AuthNotifier.logout()` solo borra
@@ -583,6 +642,14 @@ Tres cosas más que hay que resolver dentro de esta fase y no después:
   `.well-known/openid-configuration`. **No toques `webOrigins`**: ya está bien.
   Antes de creerle a la consola, `curl` el endpoint y mira el **status**. Detalle
   y arreglo en el runbook de Keycloak.
+- **El preflight de Keycloak acepta CUALQUIER origen; no te asustes.** Un
+  `curl -X OPTIONS` al token endpoint con `Origin: http://evil.example` devuelve
+  `200` **con** `access-control-allow-origin: http://evil.example`. Parece que
+  `webOrigins` no sirve de nada. Sirve: **la respuesta real** del POST solo lleva
+  `Access-Control-Allow-Origin` si el origen está registrado — verificado, un
+  origen ajeno recibe el 400 *sin* la cabecera, así que el navegador no deja
+  leerlo. La puerta del token endpoint es PKCE + validación del `redirect_uri`
+  (probado: un `redirect_uri` ajeno da **400** en `/authorize`), no CORS.
 - **Los redirect URIs de `genx-viewer` listan el dominio de CloudFront.** Cuando se
   agregue el dominio propio del cliente hay que añadirlo ahí **y** en `webOrigins`,
   o el login falla después del deploy, no durante.
