@@ -34,7 +34,9 @@ Keycloak), [`GENX-MULTI-TENANT.md`](GENX-MULTI-TENANT.md) (compilar 1, publicar 
 | **Fase 2 · Túnel como servicio de Windows** | ✅ 21-ago-2026. Servicio `cloudflared` en `RUNNING`. Runbook: [`../api/containers/keycloak/README.md`](../api/containers/keycloak/README.md) |
 | **Fase 2 · v4 republicado contra `auth.genx.mx`** | ✅ 21-ago-2026. Verificado en el `app-config.js` que sirve CloudFront, no solo en el repo |
 | **Fase 2 · El botón "Ver estudio" abre v4** | ✅ 21-ago-2026. `viewers.base_url` → `…/v4/viewer`, y el seed demo `00006` igual |
-| **Fase 3 · RPC `GetMySession`** | ⬜ pendiente y **bloquea al resto**: hoy `user` y `branches` solo viajan dentro de `LoginResponse`, y ese mismo camino es el que mantiene el espejo `users` ([§6](#-fase-3--app-de-genx-a-authorization-code)) |
+| **Fase 3 · Cliente `genx-app` en Keycloak** | ✅ 21-ago-2026. Público + PKCE `S256`, sin `directAccessGrants`. En el realm vivo **y** en `genx-realm.json`. Verificado contra `/authorize` por el issuer público |
+| **Fase 3 · La app apunta al issuer público** | ✅ 21-ago-2026. `KEYCLOAK_URL` en los 4 `config/env.*.json` → `https://auth.genx.mx` (antes `localhost:8180`, que habría dejado la cookie SSO en el host equivocado) |
+| **Fase 3 · RPC `GetMySession`** | ✅ 21-ago-2026. Probado en runtime, **incluido el upsert**: un usuario que solo existía en Keycloak obtuvo su fila en `users` sin pasar por `Login` |
 | **Fase 3 · App a authorization code + PKCE** | ⬜ pendiente. Solo web (no hay build de Windows en uso) |
 | **Fase 3 · `logout` que revoque en Keycloak** | ⬜ pendiente, va con la Fase 3 |
 | **Fase 3 · Retirar exenciones de `Login`/`RefreshToken`** | ⬜ pendiente. Dos listas que se mueven juntas: `auth.go` y `envoy.yaml` |
@@ -104,6 +106,8 @@ inferido. Las incógnitas que quedan están en §10.
 | Cliente del backend | `api/.env` | `KEYCLOAK_CLIENT_ID=genx-api` |
 | **`genx-api` en Keycloak** | realm `genx` | confidencial, `standardFlow=false`, `directAccessGrants=true`, sin PKCE → **hoy es incapaz de hacer authorization code** |
 | **`genx-viewer` en Keycloak** | realm `genx` | público, `standardFlow=true`, PKCE `S256`, mapper `aud-genx-viewer`, redirects CloudFront + `localhost:3000` → **ya es correcto** |
+| **`genx-app` en Keycloak** | realm `genx`, creado 21-ago-2026 | público, `standardFlow=true`, PKCE `S256`, `directAccessGrants=false` (no hereda ROPC), sin secreto, **sin audience mapper todavía** (va en el último paso), redirect `http://localhost:5000/*` |
+| Puerto de la app en dev | `.vscode/launch.json:55-101` | **5000** (dash usa 5001). Ya era convención del repo; el redirect URI se ancló a él |
 | Validación del JWT en Go | `api/internal/middleware/auth.go:109` | firma (JWKS) + `exp`/`nbf`/`iat`. **No valida `iss` ni `aud`** |
 | **Validación del JWT en Envoy** | `api/containers/envoy/envoy.yaml:98` | **sí valida `iss`**; el bloque `audiences` está **comentado** |
 | Authorizer de AHI | `cloud-functions/ahi-oidc-authorizer/jwks.js:165` | acepta `azp` **o** `aud` contra la lista |
@@ -438,9 +442,9 @@ Alcance en el front: la pantalla de login de Flutter pasa a ser un botón "entra
 el RPC `Login` deja de ser el camino de credenciales, y refresh/logout se mueven a
 la sesión del navegador. **`GatewayLogin` no se toca.**
 
-#### ⚠️ Falta un RPC: sin `GetMySession` la fase no puede aterrizar
+#### ✅ El RPC que faltaba: `GetMySession` · HECHO (21-ago-2026)
 
-Esto no estaba en el encargo y **bloquea** la fase. `LoginResponse` no transporta
+Esto no estaba en el encargo y **bloqueaba** la fase. `LoginResponse` no transporta
 solo tokens: lleva también `User user = 5` y `repeated BranchOption branches = 6`
 (`proto/user/user.proto:429-443`), y el front depende de las dos cosas
 (`auth_notifier.dart:47-51`; de `branches` cuelga `activeBranchIdProvider`, o sea
@@ -484,6 +488,27 @@ login** (4 saltos a Keycloak + la query de sucursales, cada 15 min por cliente �
 Keycloak, así que ese RPC deja de existir para la app web y el espejo se
 sincroniza **una vez por sesión** en vez de en cada renovación.
 
+**Cómo quedó** (`user.proto`, `user_service.go`, `user_handler.go`):
+`buildSessionForSub(ctx, sub)` es el helper compartido; `finishTokenExchange` se
+queda solo con el `GetUserInfo` que traduce token→sub y delega el resto. Cuatro
+callers, un solo camino. `GetMySession` **sí** llama a `touchLastConnection` —
+con code flow es lo que corre cuando una persona abre la app, y el criterio de
+esa función no es "hubo contraseña" sino "hubo alguien"; el refresh sigue afuera.
+
+Verificado en runtime, no solo compilado:
+
+- La respuesta trae `user` + `branches` idénticos a los de `LoginResponse`,
+  incluida la cascada que marca `is_default`.
+- **Sin token → `Unauthenticated`; token malformado → `Unauthenticated`.** No
+  está en `publicMethods` ni en las `rules` de Envoy.
+- **El upsert probado de verdad:** se creó un usuario **solo** en Keycloak, se
+  confirmó `0 filas` en `users`, se llamó `GetMySession` con su token, y la fila
+  apareció (`role_code = ''`, o sea *resuelto, sin rol propio* — no `NULL`).
+  Usuario y fila borrados después.
+- **Sin regresión en los tres caminos viejos:** `Login`, `RefreshToken` y
+  `GatewayLogin` siguen devolviendo lo mismo, y el gateway conserva su
+  `refresh_expires_in = 0` (sesión offline).
+
 Tres cosas más que hay que resolver dentro de esta fase y no después:
 
 1. **El "Salir" debe cerrar de verdad.** Hoy `AuthNotifier.logout()` solo borra
@@ -518,12 +543,22 @@ Tres cosas más que hay que resolver dentro de esta fase y no después:
 
 ## 7. Trampas ya verificadas
 
-- **El `issuer` se mueve en VARIOS sitios a la vez**: el delta del cliente del
+- **El `issuer` se mueve en CINCO sitios a la vez**: el delta del cliente del
   visor, `infra/viewer/terraform.tfvars` (`oidc_issuer`),
-  `api/containers/envoy/envoy.yaml` y `KC_HOSTNAME` del docker-compose de
-  Keycloak. Con la Fase 3 se suma la config OIDC de la app. Si se separan, el
-  visor autentica pero **AHI devuelve 403 en cada frame** y el CloudWatch del
-  authorizer sale **vacío** — despista muchísimo. Ya nos pasó.
+  `api/containers/envoy/envoy.yaml`, `KC_HOSTNAME` del docker-compose de
+  Keycloak, y —desde la Fase 3— `KEYCLOAK_URL` en los cuatro
+  `app/config/env.*.json`. Si se separan, el visor autentica pero **AHI devuelve
+  403 en cada frame** y el CloudWatch del authorizer sale **vacío** — despista
+  muchísimo. Ya nos pasó.
+- ⚠️ **El quinto sitio falla de una forma distinta y peor: en silencio.** Los
+  cuatro `env.*.json` traían `KEYCLOAK_URL=http://localhost:8180`. Con eso la app
+  habría autenticado **perfectamente** —el token lo sigue emitiendo el mismo
+  realm, con el mismo `iss`, porque lo fuerza `KC_HOSTNAME`, así que Envoy lo
+  acepta— pero la cookie SSO habría quedado en `localhost:8180`, y el visor la
+  busca en `auth.genx.mx`. Resultado: login único implementado, y el visor
+  **sigue pidiendo contraseña**. La Fase 3 entera sin efecto visible y sin un
+  solo error en consola. Corregido el 21-ago-2026. **La app y el visor tienen que
+  hablarle a Keycloak por el MISMO hostname**; no basta con que el `iss` cuadre.
 - **Idéntico carácter a carácter** al claim `iss`. Ni barra final de más, ni `http`
   donde el token dice `https`: `oidc-client-ts` compara la cadena.
 - **Mover el `issuer` le cuesta un login a TODOS los usuarios.** No es un bug ni
