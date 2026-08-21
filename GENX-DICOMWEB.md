@@ -268,17 +268,27 @@ paso 1.
 
 ---
 
-## 8. Prerrequisito de producción que v3 no tenía
+## 8. Prerrequisito de producción que v3 no tenía · ✅ RESUELTO (20/21-ago-2026)
 
-`genx-base.js` apunta hoy a un túnel efímero:
+El `authority` apuntaba a un túnel efímero (`…….trycloudflare.com`), cuyo
+hostname cambiaba en cada reinicio. **v4 no podía ir a producción así**, porque el
+authorizer corre en AWS y tiene que leer el JWKS. Era el único costo genuino de v4
+frente a v3, y era de infra, no de arquitectura.
+
+**Resuelto:** dominio propio con la zona en Cloudflare y un túnel `cloudflared`
+**con nombre** corriendo como servicio de Windows:
 
 ```js
-authority: 'https://…….trycloudflare.com/realms/genx'
+authority: 'https://auth.genx.mx/realms/genx'
 ```
 
-**v4 no puede ir a producción hasta que Keycloak tenga una URL pública estable**,
-porque el authorizer corre en AWS y tiene que leer el JWKS. Es el único costo
-genuino de v4 frente a v3, y es de infra, no de arquitectura.
+Runbook y diagnóstico en
+[`../api/containers/keycloak/README.md`](../api/containers/keycloak/README.md);
+el estado de la migración de sesión, en [`GENX-AUTH.md`](GENX-AUTH.md).
+
+⚠️ Cambiar el `.js` del cliente **no** cambia lo que sirve CloudFront hasta
+republicar sin `--dry-run`. Se perdió un rato con el repo ya correcto y el
+`app-config.js` publicado todavía apuntando al túnel muerto.
 
 Tres cosas se mueven **juntas o nada autentica**: `oidc.authority` en
 `genx-base.js`, `oidc_issuer` en `infra/viewer/terraform.tfvars`, y `KC_HOSTNAME`
@@ -307,7 +317,10 @@ con 401. Detalle completo en el README del authorizer.
    son indistinguibles en este enlace**, porque el enlace es el cuello de
    botella. La justificación de v4 es estructural, no de velocidad.
 3. **El verde**, empezando por abrir el ultrasonido en v3 (§6).
-4. **Keycloak público estable** (§8) — en paralelo, es el gate de producción.
+4. ✅ **Keycloak público estable** (§8) — resuelto el 20/21-ago-2026:
+   `auth.genx.mx` por túnel `cloudflared` con nombre, corriendo como servicio.
+   Con esto v4 deja de tener un gate de producción propio, y el botón "Ver
+   estudio" ya apunta a v4 (`viewers.base_url`).
 5. *(Después, opcional y grande)* **Caché de frames en el edge** (§7).
 
 ---

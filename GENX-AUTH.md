@@ -1,8 +1,10 @@
 # Autenticación y sesión del visor
 
-> **Estado (19-ago-2026):** diagnóstico **revisado y corregido contra el código**.
-> Fases 0 y 1 **implementadas**; la migración de la app a *authorization code*
-> sigue pendiente y ahora está desbloqueada por decisión, no por análisis.
+> **Estado (21-ago-2026):** diagnóstico **revisado y corregido contra el código**.
+> Fases 0, 1 y 2 **completas**. Keycloak vive en un hostname público estable
+> (`https://auth.genx.mx`) servido por un túnel que ya corre como servicio de
+> Windows, y el botón "Ver estudio" abre **v4**. La Fase 3 —migrar la app a
+> *authorization code*— está desbloqueada y es lo único que queda.
 >
 > **Objetivo:** que abrir un estudio desde la app de GenX **no vuelva a pedir
 > login**, y que cuando la sesión del visor se degrade el visor **lo diga**, en
@@ -28,12 +30,17 @@ Keycloak), [`GENX-MULTI-TENANT.md`](GENX-MULTI-TENANT.md) (compilar 1, publicar 
 | **Fase 1 · Eventos de sesión del visor** | ✅ `OpenIdConnectRoutes.tsx` |
 | **Fase 1 · Avisar los 401/403 de AHI** | ✅ `genx-base.js` → `window.genxSession` |
 | **Fase 1 · Publicado** | ✅ 19-ago-2026, `mx-san-mungo` / `v4`. Verificado sirviendo desde CloudFront |
-| **Fase 2 · Keycloak en hostname estable** | ⬜ decidido: túnel Cloudflare **con nombre** (no `trycloudflare`) |
+| **Fase 2 · Keycloak en hostname estable** | ✅ 20-ago-2026. `auth.genx.mx` por túnel Cloudflare **con nombre**. Login de la app verificado |
+| **Fase 2 · Túnel como servicio de Windows** | ✅ 21-ago-2026. Servicio `cloudflared` en `RUNNING`. Runbook: [`../api/containers/keycloak/README.md`](../api/containers/keycloak/README.md) |
+| **Fase 2 · v4 republicado contra `auth.genx.mx`** | ✅ 21-ago-2026. Verificado en el `app-config.js` que sirve CloudFront, no solo en el repo |
+| **Fase 2 · El botón "Ver estudio" abre v4** | ✅ 21-ago-2026. `viewers.base_url` → `…/v4/viewer`, y el seed demo `00006` igual |
 | **Fase 3 · App a authorization code + PKCE** | ⬜ pendiente. Solo web (no hay build de Windows en uso) |
 | **Fase 3 · `logout` que revoque en Keycloak** | ⬜ pendiente, va con la Fase 3 |
 
-⚠️ El cableado de la Fase 1 está publicado pero **no verificado en runtime**: no
-se observó el aviso con una sesión realmente caída. Procedimiento en §8.
+⚠️ El cableado de la Fase 1 **sí se observó en runtime** el 20-ago-2026 (así se
+descubrió que el 403 del authorizer no significa lo que parecía — §5, hueco 4).
+Lo que **no** se ha vuelto a observar es la versión **ya corregida**, la que
+pregunta por `expires_at` en vez de por el status. Procedimiento en §8.
 
 Con el hueco 6 cerrado, lo que la Fase 3 sigue aportando es el **primer** login
 del día: hoy, la primera vez que alguien abre el visor tras expirar la sesión SSO
@@ -107,7 +114,9 @@ inferido. Las incógnitas que quedan están en §10.
 | **Reintento de la librería** | `SilentRenewService`, l. 2753 | solo ante `ErrorTimeout` del iframe (`_retryTimer.init(5)`). Un fallo de red del refresh **no se reintenta** |
 | El token renovado sí llega a las peticiones | `DicomWebDataSource/index.ts:215,347,395` + `initWADOImageLoader.js:31` | `getAuthorizationHeader()` se llama **por request** |
 | Dónde lanza Flutter el visor | `app/…/viewer/application/viewer_launcher.dart:79` | `launchUrl(url, webOnlyWindowName: '_blank')` → pestaña nueva, **sin handle de ventana** |
-| Keycloak local | `api/containers/keycloak/docker-compose.yml` | `start-dev`, `KC_HOSTNAME_STRICT=false`, hostname = túnel `trycloudflare` |
+| Keycloak local | `api/containers/keycloak/docker-compose.yml` | `start-dev`, `KC_HOSTNAME=https://auth.genx.mx`, `KC_HOSTNAME_STRICT=false`, `KC_PROXY_HEADERS=xforwarded` |
+| **Issuer del realm** | `.well-known/openid-configuration` | `https://auth.genx.mx/realms/genx` — **sin barra final**. Es el valor que se compara carácter a carácter en los 4 sitios de §7 |
+| **Vía pública a Keycloak** | túnel `cloudflared` con nombre `genx-keycloak` | zona `genx.mx` en **Cloudflare** (nameservers movidos desde Namecheap), CNAME proxeado `auth.genx.mx` → `<UUID>.cfargotunnel.com` → `http://localhost:8180` |
 | Vidas en el realm `genx` | Keycloak, **cambiado 19-ago-2026** | access token **900 s**, SSO idle **14400 s**, SSO max **43200 s** |
 
 ---
@@ -348,28 +357,55 @@ Independiente de todo lo demás. Quita el "no dice nada" **antes** de tocar el
 login. Ver huecos 3 y 4.
 
 Criterio de aceptación: con el token vencido a propósito, el visor **dice qué
-pasó** y ofrece salida; no aparecen imágenes rotas sin explicación. **Falta
-verificarlo en runtime y republicar el visor.**
+pasó** y ofrece salida; no aparecen imágenes rotas sin explicación.
 
-### ⬜ Fase 2 — Keycloak con hostname público estable · **bloquea la Fase 3**
+Se observó en runtime el 20-ago-2026 adelantando el reloj, y esa observación
+**pagó por sí sola**: reveló que la regla `401 = sesión / 403 = configuración`
+era falsa, porque quien deniega es el authorizer Lambda y eso siempre sale como
+403. De ahí salió la regla correcta —preguntarle al token, no al status— que es
+la que está implementada hoy. Republicado el 21-ago-2026. **Queda volver a
+observarlo con la versión corregida.**
 
-Hoy vive en un túnel `trycloudflare` efímero, con `start-dev` y
-`KC_HOSTNAME_STRICT=false`. Con SSO por navegador ese hostname queda grabado en
-la sesión del usuario: si el túnel se cae, **todos** quedan fuera.
+### ✅ Fase 2 — Keycloak con hostname público estable · HECHA (20/21-ago-2026)
 
-Y no es solo estabilidad: el túnel existe porque **la Lambda authorizer de AHI
-necesita alcanzar el JWKS desde internet**. No es un detalle de desarrollo, es
-parte del camino de datos de producción.
+Antes vivía en un túnel `trycloudflare` **efímero**: el hostname cambiaba solo en
+cada reinicio. Con SSO por navegador ese hostname queda grabado en la sesión del
+usuario, así que un túnel que se mueve deja a **todos** fuera. Y no era solo
+estabilidad: el túnel existe porque **la Lambda authorizer de AHI necesita
+alcanzar el JWKS desde internet**. No es un detalle de desarrollo, es parte del
+camino de datos de producción.
 
-**Decidido:** túnel de Cloudflare **con nombre** (`cloudflared` con hostname
-fijo), no `trycloudflare`. Es el mejor esfuerzo/beneficio para esta etapa: quita
-el problema de que el issuer cambie solo, sin montar infra de Keycloak en AWS
-todavía. El destino sigue siendo un dominio propio detrás de ALB/ACM cuando haya
-más de una clínica en producción.
+**Lo que se hizo:** dominio propio `genx.mx` (registrado en Namecheap, zona
+delegada a **Cloudflare**) y un túnel `cloudflared` **con nombre**
+(`genx-keycloak`) publicando `auth.genx.mx` → `http://localhost:8180`. Corre como
+**servicio de Windows**, así que sobrevive reinicios.
+
+Se descartó montar Keycloak en AWS por ahora: el túnel con nombre quita el
+problema real —que el issuer cambie solo— al costo de media hora. El destino
+sigue siendo un dominio propio detrás de ALB/ACM cuando haya más de una clínica
+en producción.
+
+**El runbook completo vive en
+[`../api/containers/keycloak/README.md`](../api/containers/keycloak/README.md)**
+— cómo se montó, cómo se verifica que el JWKS es alcanzable *como lo ve la
+Lambda*, y qué hacer cuando el visor empiece a fallar con lo que parece un error
+de CORS. No está aquí a propósito: Keycloak lo usan los tres clientes del
+sistema, no solo el visor.
 
 Gracias al commit `971f54cf25` la URL vive en el **delta del cliente**, así que
-moverla es republicar (`scripts/publish-client.sh`), no recompilar. Pero se mueve
+moverla fue republicar (`scripts/publish-client.sh`), no recompilar. Pero se mueve
 **en varios sitios a la vez** — ver §7.
+
+⚠️ **Republicar no es opcional y el repo no te avisa.** El `authority` corregido
+en `config/clients/mx-san-mungo.js` no llega al navegador hasta que corre
+`publish-client.sh` **sin** `--dry-run`. Se perdió un rato persiguiendo un fallo
+de autenticación con el repo ya correcto y CloudFront sirviendo el config viejo.
+Comprobación de un solo comando, que mira lo que el usuario recibe y no lo que el
+repo dice:
+
+```bash
+curl -s https://<dominio>/v4/app-config.js | grep -o "'https://[^']*realms/genx'"
+```
 
 ### ⬜ Fase 3 — App de GenX a authorization code
 
@@ -424,6 +460,28 @@ Dos cosas que hay que resolver dentro de esta fase y no después:
   authorizer sale **vacío** — despista muchísimo. Ya nos pasó.
 - **Idéntico carácter a carácter** al claim `iss`. Ni barra final de más, ni `http`
   donde el token dice `https`: `oidc-client-ts` compara la cadena.
+- **Mover el `issuer` le cuesta un login a TODOS los usuarios.** No es un bug ni
+  una regresión, pero sorprende y hace pensar que algo se rompió. Se resetean
+  **dos** capas a la vez, las dos pegadas al hostname viejo:
+
+  1. `oidc-client-ts` llavea al usuario guardado por *authority* —
+     `` `user:${authority}:${client_id}` `` (`oidc-client-ts.js:3509`) — así que
+     la entrada de `localStorage` queda **huérfana**: sigue ahí, pero el visor ya
+     busca otra llave y nunca la encuentra.
+  2. La cookie SSO de Keycloak (`KEYCLOAK_IDENTITY`) está **pegada al host**. El
+     host nuevo no la recibe, así que Keycloak legítimamente no reconoce ese
+     navegador.
+
+  O sea que el hueco 6 (sesión persistente) sigue funcionando: lo que caducó fue
+  la dirección donde vivía. Es un costo de **una sola vez** por mudanza, y hay
+  que volver a pagarlo el día que se monte el dominio propio detrás de ALB/ACM.
+- **Un túnel caído se ve como un error de CORS.** Si `cloudflared` no está
+  corriendo, Cloudflare responde **HTTP 530 / `error code: 1033`**, y como esa
+  página de error no lleva `Access-Control-Allow-Origin`, la consola del
+  navegador reporta *"blocked by CORS policy"* sobre el
+  `.well-known/openid-configuration`. **No toques `webOrigins`**: ya está bien.
+  Antes de creerle a la consola, `curl` el endpoint y mira el **status**. Detalle
+  y arreglo en el runbook de Keycloak.
 - **Los redirect URIs de `genx-viewer` listan el dominio de CloudFront.** Cuando se
   agregue el dominio propio del cliente hay que añadirlo ahí **y** en `webOrigins`,
   o el login falla después del deploy, no durante.
@@ -544,11 +602,13 @@ siendo la §4.
 
 Honestidad sobre los límites de este diagnóstico:
 
-- **Que el cableado de la Fase 1 se comporte en runtime.** El código compila,
-  está publicado y sirviéndose desde CloudFront (verificado: `genxSession`
-  presente en `app-config.js` y en el bundle), y los eventos son API nativa de
-  `oidc-client-ts` — pero **no se observó el aviso en pantalla** con una sesión
-  realmente caída. Es lo primero que hay que hacer; el procedimiento está en §8.
+- **Que la Fase 1 YA CORREGIDA se comporte en runtime.** El aviso sí se vio en
+  pantalla el 20-ago-2026 con el reloj adelantado, y de ahí salió la corrección
+  del hueco 4. Lo que no se ha vuelto a observar es el comportamiento **después**
+  de esa corrección: que un 403 con token vigente y uno con token vencido digan
+  cosas distintas, y que el vencido se deduplique contra el aviso de
+  `addAccessTokenExpired` en vez de apilar un segundo mensaje. Procedimiento
+  en §8.
 - **Que la renovación real sea un `grant_type=refresh_token`.** Está deducido del
   código de la librería y de la config de Keycloak, que es evidencia fuerte, pero
   no se miró una renovación viva en Network. §8 dice cómo.
