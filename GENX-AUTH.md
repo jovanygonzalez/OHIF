@@ -34,8 +34,10 @@ Keycloak), [`GENX-MULTI-TENANT.md`](GENX-MULTI-TENANT.md) (compilar 1, publicar 
 | **Fase 2 · Túnel como servicio de Windows** | ✅ 21-ago-2026. Servicio `cloudflared` en `RUNNING`. Runbook: [`../api/containers/keycloak/README.md`](../api/containers/keycloak/README.md) |
 | **Fase 2 · v4 republicado contra `auth.genx.mx`** | ✅ 21-ago-2026. Verificado en el `app-config.js` que sirve CloudFront, no solo en el repo |
 | **Fase 2 · El botón "Ver estudio" abre v4** | ✅ 21-ago-2026. `viewers.base_url` → `…/v4/viewer`, y el seed demo `00006` igual |
+| **Fase 3 · RPC `GetMySession`** | ⬜ pendiente y **bloquea al resto**: hoy `user` y `branches` solo viajan dentro de `LoginResponse`, y ese mismo camino es el que mantiene el espejo `users` ([§6](#-fase-3--app-de-genx-a-authorization-code)) |
 | **Fase 3 · App a authorization code + PKCE** | ⬜ pendiente. Solo web (no hay build de Windows en uso) |
 | **Fase 3 · `logout` que revoque en Keycloak** | ⬜ pendiente, va con la Fase 3 |
+| **Fase 3 · Retirar exenciones de `Login`/`RefreshToken`** | ⬜ pendiente. Dos listas que se mueven juntas: `auth.go` y `envoy.yaml` |
 
 ⚠️ El cableado de la Fase 1 **sí se observó en runtime** el 20-ago-2026 (así se
 descubrió que el 403 del authorizer no significa lo que parecía — §5, hueco 4).
@@ -436,17 +438,81 @@ Alcance en el front: la pantalla de login de Flutter pasa a ser un botón "entra
 el RPC `Login` deja de ser el camino de credenciales, y refresh/logout se mueven a
 la sesión del navegador. **`GatewayLogin` no se toca.**
 
-Dos cosas que hay que resolver dentro de esta fase y no después:
+#### ⚠️ Falta un RPC: sin `GetMySession` la fase no puede aterrizar
+
+Esto no estaba en el encargo y **bloquea** la fase. `LoginResponse` no transporta
+solo tokens: lleva también `User user = 5` y `repeated BranchOption branches = 6`
+(`proto/user/user.proto:429-443`), y el front depende de las dos cosas
+(`auth_notifier.dart:47-51`; de `branches` cuelga `activeBranchIdProvider`, o sea
+el header `x-branch-id`, o sea **todo el RLS**).
+
+Con code flow el token lo emite Keycloak **directamente al navegador**, así que
+`Login` y `RefreshToken` dejan de correr — y con ellos desaparece el único
+transporte de ese payload. No hay repuesto: en `user.proto` no existe ningún
+`GetMe`/`GetCurrentUser`, y los únicos tres RPC que devuelven `LoginResponse` son
+`Login`, `RefreshToken` y `GatewayLogin`.
+
+**Pero el agujero real es más profundo que "faltan datos en pantalla".** Ese
+mismo camino es el que mantiene vivo el espejo local de Keycloak:
+`finishTokenExchange` (`user_service.go:1135-1184`) hace `syncUserFromKeycloak`,
+el upsert en la tabla `users` — y recordá que **`users.id` ES el `sub` del JWT**,
+no hay columna `keycloak_id`. Si nadie llama a ese camino, un usuario recién
+creado en Keycloak autentica **perfectamente** (el `AuthInterceptor` solo mira
+firma y `exp`, `auth.go:109`) y **no tiene fila en `users`**. Lo que se ve
+entonces:
+
+- `BranchInterceptor` → `ListBranchesForUser` arranca con `FROM users u WHERE
+  u.id = $1` → cero sucursales → **`PermissionDenied`** … y el resultado vacío
+  queda **cacheado 5 minutos** (`branch_access_cache.go:19`).
+- `UpdateMyPreferences` revienta por FK contra `users(id)`.
+
+O sea: un fallo de *identidad* que se reporta como *permiso denegado*, y que
+además persiste 5 min después de arreglarlo. Exactamente el modo de fallo que
+`docs/security.md` §6 marca como el más caro de diagnosticar.
+
+**La forma del arreglo.** Un RPC nuevo `GetMySession` (sin `user_id` en el
+request — el patrón de `GetMyPreferences`, `user_preference_handler.go:104-115`)
+que devuelva `User` + `branches`, y que **haga el upsert**. Casi todo el código ya
+existe: `finishTokenExchange` son seis pasos y solo el primero
+(`GetUserInfo`, l. 1136) sobra, porque el `sub` ya viene del JWT validado en el
+`ctx`. Se extraen los pasos 2-6 a un `buildSessionForSub(ctx, sub)` y lo comparten
+`finishTokenExchange` y `GetMySession`. Cero SQL nuevo.
+
+De regalo, un costo que desaparece: hoy **el refresh cuesta lo mismo que el
+login** (4 saltos a Keycloak + la query de sucursales, cada 15 min por cliente —
+`security.md` §7). Con code flow el refresh ocurre en el navegador contra
+Keycloak, así que ese RPC deja de existir para la app web y el espejo se
+sincroniza **una vez por sesión** en vez de en cada renovación.
+
+Tres cosas más que hay que resolver dentro de esta fase y no después:
 
 1. **El "Salir" debe cerrar de verdad.** Hoy `AuthNotifier.logout()` solo borra
    el almacenamiento local; el refresh token que quedó fuera sigue siendo
    canjeable durante las 4 h de sesión ociosa. Con code flow esto se convierte en
    un redirect al `end_session_endpoint`, que además cierra la del visor. En una
    estación compartida de radiología esto no es cosmético.
-2. **Desbloquear** deja de ser un `login` con contraseña contra el backend y pasa
-   a ser `signinRedirect({ prompt: 'login' })`. La contraseña la vuelve a pedir
-   Keycloak, y la sesión del visor **no se entera** — que es exactamente lo que
-   hace que el radiólogo pueda leer sin interrupciones con la estación protegida.
+2. **Desbloquear** deja de ser un `login` con contraseña contra el backend
+   (`auth_notifier.dart:185`, que hoy rehace un ROPC completo). La contraseña la
+   vuelve a pedir Keycloak, y la sesión del visor **no se entera** — que es
+   exactamente lo que hace que el radiólogo pueda leer sin interrupciones con la
+   estación protegida.
+
+   ⚠️ **Decidido: popup, no `signinRedirect`.** Una versión anterior de esta
+   sección proponía `signinRedirect({ prompt: 'login' })`. Es más simple de
+   escribir, pero navega fuera de la SPA: al volver, Flutter web **recarga desde
+   cero** y se pierde todo lo que estuviera a medio llenar — una orden de
+   servicio, un informe sin guardar. Una pantalla de *bloqueo* que cuesta lo
+   mismo que salir y entrar no es una pantalla de bloqueo. Va por ventana
+   emergente (`window.open` + `postMessage` desde la página de callback), con la
+   app viva en memoria detrás.
+
+3. **Las exenciones de JWT quedan huérfanas y hay que retirarlas.** `Login` y
+   `RefreshToken` están exentos de validación en **dos** listas que hay que mover
+   juntas: `publicMethods` en `auth.go:42-54` y las `rules` de `jwt_authn` en
+   `envoy.yaml:122-125`. Cuando la app deje de usarlos, dejarlos abiertos es
+   superficie de ataque sin contrapartida. Y al revés: **`GetMySession` NO va en
+   esas listas** — necesita el JWT, que es justamente de donde saca de quién es
+   la sesión.
 
 ---
 
