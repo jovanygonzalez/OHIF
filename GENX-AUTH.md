@@ -9,9 +9,14 @@
 > tres remates —logout real, desbloqueo por ventana emergente, y retirar las
 > exenciones de JWT que quedaron huérfanas— listados en la tabla de abajo.
 >
-> **Objetivo:** que abrir un estudio desde la app de GenX **no vuelva a pedir
-> login**, y que cuando la sesión del visor se degrade el visor **lo diga**, en
-> vez de romperse en silencio.
+> **Objetivo — ✅ CUMPLIDO Y OBSERVADO EN RUNTIME (21-ago-2026):** que abrir un
+> estudio desde la app de GenX **no vuelva a pedir login**, y que cuando la
+> sesión del visor se degrade el visor **lo diga** en vez de romperse en
+> silencio.
+>
+> Probado de punta a punta: entrar a la app → portada → formulario de Keycloak →
+> dashboard con la sucursal cargada → **"Ver estudio" abre el visor sin pedir
+> nada**. Dos logins pasaron a ser **uno**, y ese uno lo cobra la app.
 
 > ⚠️ **Antes de escribir código, lee la sección 9 (Lo que NO hacer).** Hay un
 > atajo que funciona hoy, está soportado de fábrica por OHIF y es la tentación
@@ -41,8 +46,9 @@ Keycloak), [`GENX-MULTI-TENANT.md`](GENX-MULTI-TENANT.md) (compilar 1, publicar 
 | **Fase 3 · La app apunta al issuer público** | ✅ 21-ago-2026. `KEYCLOAK_URL` en los 4 `config/env.*.json` → `https://auth.genx.mx` (antes `localhost:8180`, que habría dejado la cookie SSO en el host equivocado) |
 | **Fase 3 · RPC `GetMySession`** | ✅ 21-ago-2026. Probado en runtime, **incluido el upsert**: un usuario que solo existía en Keycloak obtuvo su fila en `users` sin pasar por `Login` |
 | **Fase 3 · App a authorization code + PKCE** | ✅ 21-ago-2026. `oidc_client.dart` (PKCE S256 a mano, cero dependencias nuevas), ruta `/auth/callback`, refresh contra Keycloak. Solo web |
-| **Fase 3 · `logout` que revoque en Keycloak** | ⬜ pendiente, siguiente paso. `OidcClient.endSessionUri` ya está escrito |
-| **Fase 3 · Desbloqueo por ventana emergente** | ⬜ pendiente. Hoy desbloquea con `prompt=login` **por redirect**, que recarga la app |
+| **Fase 3 · `logout` que revoque en Keycloak** | ✅ 21-ago-2026. Redirect al `end_session_endpoint` con `id_token_hint`. Cierra también la sesión del visor |
+| **Fase 3 · Desbloqueo por ventana emergente** | ✅ 21-ago-2026. `window.open` + `postMessage` desde `web/auth/popup_callback.html`. La app no se recarga |
+| **Fase 3 · Que el bloqueo llegue a ocurrir** | ✅ 22-ago-2026. La cuenta regresiva devolvía `signOut`: la inactividad **cerraba** la sesión y la pantalla de bloqueo era código muerto. Ahora devuelve `lock`, y hay "Bloquear pantalla" en el menú del avatar |
 | **Fase 3 · Retirar exenciones de `Login`/`RefreshToken`** | ⬜ pendiente. Dos listas que se mueven juntas: `auth.go` y `envoy.yaml` |
 
 ⚠️ El cableado de la Fase 1 **sí se observó en runtime** el 20-ago-2026 (así se
@@ -172,10 +178,13 @@ Beneficios que justifican el trabajo por sí solos, aparte del login único:
 
 ### Hueco 1 — No existe sesión SSO (causa del prompt) · **CERRADO** (21-ago-2026)
 
-Era el único cambio estructural de todo el documento: la app autentica por
-**authorization code en el navegador**, así que el navegador **sí** visita
-Keycloak y se lleva su cookie SSO — la que el visor encuentra después. Ver Fase 3
-en la sección 6 para cómo quedó.
+Era el único cambio estructural de todo el documento, y el que justificaba las
+otras tres fases. La app autentica por **authorization code en el navegador**,
+así que el navegador **sí** visita Keycloak y se lleva su cookie SSO — la que el
+visor encuentra después.
+
+**Verificado en runtime, no deducido:** el usuario entró a la app y abrió un
+estudio; el visor no pidió nada. Cómo quedó: Fase 3 en la §6.
 
 ### Hueco 2 — ~~La renovación cuelga de un iframe~~ · **NO EXISTE**
 
@@ -568,35 +577,111 @@ login. Antes eso dejaba tokens vivos; con SSO además la cookie de Keycloak sigu
 en pie, así que pulsar "Entrar" volvía a entrar **sin preguntar nada** — o sea
 que no cerraba nada y encima lo disimulaba.
 
-Tres cosas más que hay que resolver dentro de esta fase y no después:
+#### ✅ Logout real y desbloqueo por ventana emergente · HECHO (21-ago-2026)
 
-1. **El "Salir" debe cerrar de verdad.** Hoy `AuthNotifier.logout()` solo borra
-   el almacenamiento local; el refresh token que quedó fuera sigue siendo
-   canjeable durante las 4 h de sesión ociosa. Con code flow esto se convierte en
-   un redirect al `end_session_endpoint`, que además cierra la del visor. En una
-   estación compartida de radiología esto no es cosmético.
-2. **Desbloquear** deja de ser un `login` con contraseña contra el backend
-   (`auth_notifier.dart:185`, que hoy rehace un ROPC completo). La contraseña la
-   vuelve a pedir Keycloak, y la sesión del visor **no se entera** — que es
-   exactamente lo que hace que el radiólogo pueda leer sin interrupciones con la
-   estación protegida.
+**El "Salir" ahora cierra de verdad.** `AuthNotifier.logout()` borra lo local
+**y** redirige al `end_session_endpoint` con `id_token_hint`. Antes solo hacía lo
+primero, y eso dejaba tres cosas vivas: el refresh token seguía siendo canjeable
+las 4 h de sesión ociosa, la sesión del visor seguía abierta, y la cookie SSO
+hacía que pulsar "Entrar" volviera a entrar sin preguntar nada. En una estación
+compartida de radiología eso no es cosmético.
 
-   ⚠️ **Decidido: popup, no `signinRedirect`.** Una versión anterior de esta
-   sección proponía `signinRedirect({ prompt: 'login' })`. Es más simple de
-   escribir, pero navega fuera de la SPA: al volver, Flutter web **recarga desde
-   cero** y se pierde todo lo que estuviera a medio llenar — una orden de
-   servicio, un informe sin guardar. Una pantalla de *bloqueo* que cuesta lo
-   mismo que salir y entrar no es una pantalla de bloqueo. Va por ventana
-   emergente (`window.open` + `postMessage` desde la página de callback), con la
-   app viva en memoria detrás.
+⚠️ **Hay dos cierres y no son intercambiables.** `logout()` es la salida
+**explícita** del usuario (y el tope duro de inactividad, que es una estación
+abandonada): termina la sesión en Keycloak. `abandonSession()` es para cuando la
+sesión se murió sola —refresh rechazado, `onSessionExpired`—: ahí Keycloak ya la
+dio por terminada, y mandarlo al `end_session_endpoint` con un `id_token_hint`
+vencido solo intercala una pantalla de confirmación de Keycloak justo después del
+diálogo de "sesión expirada". Confundirlos no rompe nada, pero se ve mal y es
+difícil de atribuir después.
 
-3. **Las exenciones de JWT quedan huérfanas y hay que retirarlas.** `Login` y
-   `RefreshToken` están exentos de validación en **dos** listas que hay que mover
-   juntas: `publicMethods` en `auth.go:42-54` y las `rules` de `jwt_authn` en
-   `envoy.yaml:122-125`. Cuando la app deje de usarlos, dejarlos abiertos es
-   superficie de ataque sin contrapartida. Y al revés: **`GetMySession` NO va en
-   esas listas** — necesita el JWT, que es justamente de donde saca de quién es
-   la sesión.
+**El desbloqueo va por ventana emergente**, como estaba decidido. La página que
+aterriza es **HTML plano** (`app/web/auth/popup_callback.html`), no la ruta
+`/auth/callback` de Flutter: esa ruta arrancaría la aplicación entera por segunda
+vez dentro de la ventanita —megabytes de JS y un segundo contenedor de estado—
+para después tirarla.
+
+| Archivo | Qué cambió |
+|---|---|
+| `app/web/auth/popup_callback.html` | **Nuevo.** Rebota el `code` al padre por `postMessage` y se cierra. Nunca ve un token |
+| `oidc_client.dart` | `_authorizeUrl` compartido, `loginWithPopup()`, `_awaitPopupCallback()`, `endSession()` |
+| `auth_notifier.dart` | `logout()` real; `beginUnlock()` → `unlock()`; `_abandonSession` pasa a público |
+| `lock_screen.dart` | Con estado: ocupado + motivo del fallo. La sesión sigue `locked` si algo falla |
+| `main.dart` | Al bloquear recuerda la ruta; al desbloquear sale de `/auth/lock`; `onSessionExpired` → `abandonSession()` |
+
+Cuatro decisiones que no se deducen del código:
+
+1. **El `code_verifier` del desbloqueo vive en memoria, no en `sessionStorage`**
+   (al revés que el del login por redirect). Esta pestaña no se descarga en
+   ningún momento, así que no hay nada que persistir — y de paso queda fuera del
+   alcance de la ventana emergente, que nunca ve más que el `code`.
+2. **`unlock()` se llama sin `await` previo**, desde el `onPressed` mismo. La
+   ventana se abre en la primera línea síncrona; cualquier espera de por medio y
+   el navegador la bloquea por no venir de un gesto del usuario. Por eso la
+   pantalla atiende el resultado con `then` y no con `async`/`await`.
+3. **Al detectar la ventana cerrada se espera una gracia de 300 ms** antes de
+   darlo por cancelado: la ventana hace `postMessage` y `close()` seguidos, así
+   que el mensaje puede llegar un instante *después* de que `closed` ya sea
+   `true`. Sin la gracia, el desbloqueo bueno fallaría de vez en cuando.
+4. **Si en la ventana se autentica OTRA persona, la aplicación se recarga
+   entera.** Lo que hay en memoria —providers, listas, formularios abiertos— es
+   del usuario anterior, y no existe una forma parcial de sanearlo. Se guarda la
+   sesión nueva y se arranca de cero.
+
+**De paso quedó cierta una promesa que la pantalla de bloqueo ya hacía.** Decía
+"continuá donde estabas" y aterrizaba siempre en el tablero: `Get.offAllNamed`
+destruye la pila de navegación. Ahora el listener recuerda la ruta al bloquear y
+vuelve a ella. Ojo con el matiz: lo que se preserva de verdad son los providers
+de Riverpod, que sobreviven porque la página **no** se recarga; el estado que
+viva dentro de los widgets de la ruta se fue con `offAllNamed`, y eso el popup no
+lo arregla.
+
+#### ⚠️ El bloqueo era inalcanzable — corregido el 22-ago-2026
+
+La primera prueba de campo del desbloqueo no encontró nada que desbloquear:
+quince minutos de inactividad **cerraban la sesión** y la portada ofrecía
+"Entrar", nunca "Desbloquear". La pantalla de bloqueo existía, estaba
+cableada y era **código muerto**.
+
+La causa no está en `IdleSessionMonitor` sino en el diálogo de aviso. El aviso
+sale *dentro* del plazo de inactividad (a los 14:40 de 15:00) y pone
+`_warningShowing = true`, que hace que `_check` se retire mientras esté en
+pantalla. O sea que la rama `elapsed >= _idleLimit` —la que llama a `_lock()`—
+**nunca llega a correr** en el camino normal: para cuando el plazo vence, quien
+decide es el valor que devuelve el diálogo. Y devolvía `IdleWarningAction.signOut`
+al llegar a 0. Un desenlace que parecía un detalle de UI era, de hecho, toda la
+política de sesión desatendida.
+
+La lección general: **cuando un diálogo modal congela al monitor que lo abrió, el
+que decide es el diálogo.** Vale para cualquier plazo futuro que se le agregue.
+
+Tres cambios:
+
+- La cuenta a 0 devuelve `IdleWarningAction.lock` (nadie contestó ⇒ estación
+  desatendida ⇒ candado). El botón explícito "Cerrar sesión" es el único
+  `signOut`. Son **tres** desenlaces, no dos: `keepWorking` / `lock` / `signOut`.
+- El texto del diálogo decía "cerraremos tu sesión" y ahora dice qué va a pasar
+  de verdad — bloquear. Prometía el comportamiento viejo aun después de
+  arreglarlo.
+- **"Bloquear pantalla"** en el menú del avatar, junto a "Cerrar sesión". Es la
+  acción real (`lockSession()`), no una navegación decorativa a `route.lock`
+  como la del menú de plantillas heredado. Hace la política usable a voluntad y
+  probable sin cronómetro.
+
+De paso, `CustomPopupMenu` no removía sus `OverlayEntry` al desmontarse. El menú
+vive en el Overlay del Navigator, no en el subárbol de la barra: bloquear con el
+menú abierto lo dejaba flotando —y clicable— sobre la pantalla de bloqueo.
+
+**Lo que queda de la fase.** **Las exenciones de JWT quedaron huérfanas y hay que
+retirarlas.** `Login` y `RefreshToken` están exentos de validación en **dos**
+listas que hay que mover juntas: `publicMethods` en `auth.go:42-54` y las `rules`
+de `jwt_authn` en `envoy.yaml:122-125`. Ahora que la app no los usa, dejarlos
+abiertos es superficie de ataque sin contrapartida. Con un matiz ya verificado:
+`RefreshToken` **debe seguir público en `auth.go`** porque lo llama el agente
+DICOM (`clinic-gateway/agent/internal/auth/token.go:286`); como disca al 50051
+directo, la exención de **Envoy** sí se puede quitar. Y al revés: **`GetMySession`
+NO va en esas listas** — necesita el JWT, que es justamente de donde saca de quién
+es la sesión.
 
 ---
 
@@ -657,6 +742,21 @@ Tres cosas más que hay que resolver dentro de esta fase y no después:
   `webOnlyWindowName: '_blank'`). Ver `docs/viewers.md`. Nota para §9: eso
   significa que la app **no conserva el handle de la ventana**, así que el puente
   por `postMessage` ni siquiera está disponible hoy sin cambiar el lanzamiento.
+- ⚠️ **Cada puerto de desarrollo de la app es ahora parte del contrato.** Con
+  ROPC daba igual en qué puerto viviera la app: nunca salía a Keycloak. Con
+  authorization code el `redirect_uri` sale del origen vivo del navegador, así
+  que un puerto sin registrar da **"Invalid parameter: redirect_uri"** al pulsar
+  "Entrar". Ya pasó: la tarea *Serve & Open Web Build (Python)* de VS Code sirve
+  en **8081** y solo estaba registrado el **5000** de `flutter run`. Los dos
+  están ahora en `redirectUris`, `webOrigins` **y**
+  `post.logout.redirect.uris` — los tres, no solo el primero.
+- ⚠️ **`python -m http.server` no puede servir esta app.** La app usa URLs sin
+  `#` (`setPathUrlStrategy`), así que `/auth/callback` —donde aterriza el retorno
+  de Keycloak— no existe como archivo y `http.server` lo contesta con un **404**.
+  Hace falta el fallback a `index.html` de cualquier hosting de SPA: está en
+  `app/tools/serve_web.py`, que es lo que corre la tarea. Ojo con el orden en que
+  se manifiestan los dos problemas: el del puerto corta antes, así que el 404 no
+  se ve hasta haber arreglado el primero.
 - **`routerBasename` sin barra final** — ya documentado extensamente en
   `genx-base.js`; con `/v4/` el callback entra en bucle.
 - **AHI exige `aud`/`azp` y tolera CERO deriva en `iat`.** Un segundo de reloj
