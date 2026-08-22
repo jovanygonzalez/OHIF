@@ -49,7 +49,7 @@ Keycloak), [`GENX-MULTI-TENANT.md`](GENX-MULTI-TENANT.md) (compilar 1, publicar 
 | **Fase 3 · `logout` que revoque en Keycloak** | ✅ 21-ago-2026. Redirect al `end_session_endpoint` con `id_token_hint`. Cierra también la sesión del visor |
 | **Fase 3 · Desbloqueo por ventana emergente** | ✅ 21-ago-2026. `window.open` + `postMessage` desde `web/auth/popup_callback.html`. La app no se recarga |
 | **Fase 3 · Que el bloqueo llegue a ocurrir** | ✅ 22-ago-2026. La cuenta regresiva devolvía `signOut`: la inactividad **cerraba** la sesión y la pantalla de bloqueo era código muerto. Ahora devuelve `lock`, y hay "Bloquear pantalla" en el menú del avatar |
-| **Fase 3 · Retirar exenciones de `Login`/`RefreshToken`** | ⬜ pendiente. Dos listas que se mueven juntas: `auth.go` y `envoy.yaml` |
+| **Fase 3 · Endurecer `aud` + retirar exenciones** | ✅ 22-ago-2026. Mapper `aud-genx-api` en `genx-app`, `audiences` encendido en Envoy, y `Login`/`RefreshToken` fuera de las reglas. Las dos listas **no** se movieron juntas: `RefreshToken` sigue público en `auth.go` para el agente DICOM |
 
 ⚠️ El cableado de la Fase 1 **sí se observó en runtime** el 20-ago-2026 (así se
 descubrió que el 403 del authorizer no significa lo que parecía — §5, hueco 4).
@@ -672,16 +672,73 @@ De paso, `CustomPopupMenu` no removía sus `OverlayEntry` al desmontarse. El men
 vive en el Overlay del Navigator, no en el subárbol de la barra: bloquear con el
 menú abierto lo dejaba flotando —y clicable— sobre la pantalla de bloqueo.
 
-**Lo que queda de la fase.** **Las exenciones de JWT quedaron huérfanas y hay que
-retirarlas.** `Login` y `RefreshToken` están exentos de validación en **dos**
-listas que hay que mover juntas: `publicMethods` en `auth.go:42-54` y las `rules`
-de `jwt_authn` en `envoy.yaml:122-125`. Ahora que la app no los usa, dejarlos
-abiertos es superficie de ataque sin contrapartida. Con un matiz ya verificado:
-`RefreshToken` **debe seguir público en `auth.go`** porque lo llama el agente
-DICOM (`clinic-gateway/agent/internal/auth/token.go:286`); como disca al 50051
-directo, la exención de **Envoy** sí se puede quitar. Y al revés: **`GetMySession`
-NO va en esas listas** — necesita el JWT, que es justamente de donde saca de quién
-es la sesión.
+---
+
+### ✅ Paso 5 — Endurecer `aud` y retirar las exenciones · HECHO (22-ago-2026)
+
+Último paso de la fase. Tres cambios, aplicados en ese orden porque el primero es
+aditivo y el último es el que corta:
+
+1. **Mapper `aud-genx-api` en `genx-app`** (realm vivo **y** `genx-realm.json`),
+   copiando la forma de `aud-genx-viewer`.
+2. **`Login` fuera de `publicMethods`** (`auth.go`). Solo `Login`.
+3. **`audiences: [genx-api]` encendido en Envoy** y las reglas de `Login` y
+   `RefreshToken` retiradas.
+
+**Lo que este paso quita no era teórico.** El token del visor DICOM vive en el
+`localStorage` del navegador y viaja a AWS; hasta hoy servía tal cual para llamar
+al API del RIS, porque Envoy aceptaba cualquier token del realm.
+
+⚠️ **`account` NO va en la lista de audiencias.** Casi todo token del realm lo
+lleva (el mapper *audience resolve* del scope `roles`), así que listarlo
+aceptaría cualquier cosa: el chequeo quedaría puesto y sin valor. `jwt_authn`
+acepta si coincide **alguna**, así que con `genx-api` a secas los tokens que
+además traen `account` pasan igual.
+
+⚠️ **Las dos listas de exenciones NO son espejo, y no deben serlo.**
+`RefreshToken` salió de Envoy y **se quedó** en `auth.go`: lo llama el agente
+DICOM (`clinic-gateway/agent/internal/auth/token.go:286`), que disca al 50051 y
+nunca pasa por Envoy. Cada lista cubre a clientes distintos. Y al revés,
+**`GetMySession` no va en ninguna de las dos** — necesita el JWT, que es de donde
+saca de quién es la sesión.
+
+⚠️ **No "completar" el arreglo validando `aud` en Go.** Los tokens de `genx-api`
+—los del agente de cada clínica— no llevan `aud` a propósito. Validarlo en
+`auth.go` dejaría fuera a todas las clínicas.
+
+#### Lo que costó: las exenciones no estaban huérfanas
+
+El plan las daba por muertas porque la app ya no las usaba. **`dash/`** —el
+sistema de soporte, 45 archivos con sus cuatro perfiles en `launch.json`— sigue
+en ROPC y sale por Envoy (`GRPC_WEB_PORT: 8085`), llamando a los dos RPC.
+
+Y el golpe grande no era el login: sus tokens salen de `genx-api` por password
+grant, **sin `aud`**, así que encender `audiences` no le rompe el login sino
+**cada llamada**. Se ejecutó igual: `dash` está deprecado y se va a eliminar. Con
+esto queda **fuera de servicio a sabiendas**, anotado en su README.
+
+La lección para el próximo paso de este tipo: *"la app ya no lo llama"* no es lo
+mismo que *"nadie lo llama"*. Hay más de un front en este repo.
+
+#### Verificado, positivo y negativo
+
+| Prueba | Antes | Después |
+|---|---|---|
+| Token ROPC (sin `aud`) → `GetMySession` por Envoy | pasaba | **403** |
+| `Login` sin token por Envoy | pasaba | **401** |
+| `RefreshToken` sin token por Envoy | pasaba | **401** |
+| `HealthService` sin token por Envoy | pasaba | pasa (exento a propósito) |
+| `RefreshToken` en **50051 directo** | pasaba | **pasa** (el agente vive) |
+| `Login` en 50051 directo | pasaba | **`Unauthenticated`** |
+| `GatewayLogin` en 50051 directo | pasaba | pasa |
+
+⚠️ **El fallo de audiencia es HTTP 403, no 401.** 401 = no hay token o no valida;
+403 = el token es bueno pero su `aud` no está permitida. Distinguirlos ahorra
+buscar en el sitio equivocado.
+
+⚠️ **Las sesiones abiertas se caen al encender `audiences`**: sus access tokens
+se emitieron antes del mapper. Hay que volver a entrar — el 401/403 de Envoy no
+le llega a la app como `Unauthenticated` de gRPC, así que no dispara el refresh.
 
 ---
 
