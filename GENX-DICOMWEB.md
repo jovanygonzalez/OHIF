@@ -517,8 +517,139 @@ del arranque. Un visor que "funcionaba ayer y hoy no", sin que nadie tocara nada
 es casi siempre esto. Detalle completo y arreglo permanente:
 [`../api/containers/keycloak/README.md`](../api/containers/keycloak/README.md) §6.
 
+## 12. La lista de estudios: un `includefield` que costaba 1 segundo (aplicado 2026-08-23)
+
+Síntoma reportado: *"la página que lista todos los estudios del datastore se
+siente lenta al abrir"*. La sospecha natural era el caché —el listado va con
+`no-store` por §10— y **la sospecha era falsa**. El cuello estaba en un solo
+parámetro de la consulta.
+
+### La apertura, cronometrada
+
+Caché de navegador tibia, sesión de Keycloak viva, medido con Resource Timing:
+
+| Tramo | ms | Acumulado |
+|---|---|---|
+| HTML `/v4` + bundle (30 de 31 chunks **desde caché**) + primer pintado | 744 | 744 |
+| Arranque de React/OHIF hasta pedir el discovery de OIDC | 661 | 1 405 |
+| Keycloak: `openid-configuration` (88) + `token` (132) | 220 | 1 626 |
+| **QIDO de la lista** | **1 384** | **3 061 ← lista pintada** |
+
+**El 45 % de la apertura era una sola petición.** Y eso descarta el caché de
+entrada: el bundle ya venía cacheado y la apertura seguía tardando 3 s.
+
+### La causa: `includefield` a nivel de ESTUDIO
+
+`mapParams` (`extensions/default/src/DicomWebDataSource/qido.js`) pedía por
+default `includefield=00081030,00080060` (StudyDescription y Modality). Para
+responder eso, **AHI tiene que abrir el metadata de cada image set**, una vez por
+fila devuelta. Medido, corridas alternadas por el camino real
+(navegador → CloudFront → authorizer OIDC → AHI), 47 estudios:
+
+| Variante | corridas | mediana |
+|---|---|---|
+| `includefield=00081030,00080060` | 1713 / 1488 / 1449 ms | **1 488 ms** |
+| sin `includefield` | 469 / 537 / 573 ms | **537 ms** |
+
+**2.8×.** El costo es ~19 ms por fila y escala hasta el tope de 101 que pide
+OHIF: proyectado, ~2.4 s cuando la lista se llene.
+
+**Es todo o nada:** pedir un solo campo dispara el mismo trabajo
+(`00081030` solo = 1528 ms, `00080060` solo = 1322 ms). Y **solo pasa a nivel
+estudio**: el `includefield` del QIDO de **series** (al expandir una fila) es
+gratis — 233 ms con, 239 ms sin.
+
+### Lo que ese segundo compraba: casi nada
+
+| Campo | Filas con dato (de 47) | ¿Hace falta pedirlo? |
+|---|---|---|
+| `00081030` StudyDescription | **6** (13 %) | Sí, y es el que más cuesta |
+| `00080060` Modality | 47 | **No** |
+| `00080061` ModalitiesInStudy | 47 | **Ya viene gratis** |
+
+`00080061` no solo es gratis, es **mejor**: lista `SR/US`, `CR/SR`, `US/KO/SR`
+donde `00080060` decía solo `US`, `CR`, `KO`. Y `getModalities()`
+(`platform/core/src/DICOMWeb`) cae a `ModalitiesInStudy` cuando `Modality` falta,
+así que **la columna de modalidad no se degradó, mejoró**.
+
+El trade real fue: **~1 segundo por apertura a cambio de la columna Descripción en
+el 13 % de las filas.** Se tomó. Vive en `qidoIncludeFields: []`
+(`config/genx-base.js`); sin definir, el comportamiento vuelve al de upstream.
+
+### La consecuencia que hubo que cerrar: el filtro de Descripción
+
+Al desaparecer la columna, el filtro pasó a ser el único acceso a ese dato — y
+**estaba roto**. `supportsWildcard` estaba en `false`, así que OHIF mandaba el
+valor tal cual y AHI exige coincidencia exacta:
+
+| Filtro | antes | ahora (`supportsWildcard: true`) |
+|---|---|---|
+| Descripción `TORAX` | **204, lista vacía** | `*TORAX*` → 1 ✅ |
+| Núm. Adhesión `FAA` | **204, lista vacía** | `*FAA*` → 11 ✅ |
+| MRN `2604` | **204, lista vacía** | `*2604*` → 1 ✅ |
+| Núm. Adhesión `FAA-45587` (exacto) | 1 ✅ | 1 ✅ (sin regresión) |
+
+Ninguna consulta exacta se degrada al envolverla. El panel de estudios previos
+del paciente no se ve afectado: `getStudiesForPatientByMRN` pasa
+`disableWildcard: true`, que tiene precedencia sobre la bandera.
+
+Dos límites que **quedan abiertos**: sigue siendo sensible a mayúsculas
+(`*torax*` → 204, `*TORAX*` → 1), y envolver un valor exacto puede casar más de
+una fila por subcadena.
+
+### Probado y descartado
+
+- **`fuzzymatching=true`.** AHI lo acepta y vuelve `PatientName` insensible a
+  mayúsculas, pero devuelve **11 de 47** estudios buscando "galvan" — es el
+  matching fonético de nombres de DICOM, demasiado laxo para una lista clínica.
+  Además `mapParams` solo lo aplica a `PatientName`, así que ni siquiera arregla
+  el filtro de Descripción. Se queda en `false`.
+- **Rango de fechas por defecto en el worklist.** Acota la consulta (un día son
+  11 estudios en 249 ms) pero **no compra velocidad hoy** (300 → 250 ms con 47
+  estudios; el ahorro grande ya lo dio quitar `includefield`). Y en este datastore
+  los estudios van de 2016 a **jun-2026**, así que con "hoy" en ago-2026
+  cualquier ventana menor a 90 días deja la **lista vacía**, que se lee como
+  "el visor se rompió". Cancelado a propósito.
+- **Service worker.** Descartado como sospechoso: `init-service-worker.js`
+  registra dentro de `if ('function' === typeof importScripts)`, que es `false`
+  en el hilo principal. **Nunca corre**, así que no precachea los 209 MB del
+  bucket. Es código muerto de upstream.
+
+### Riesgo estructural que sigue vivo
+
+OHIF pide **101 estudios** y pagina del lado del cliente dentro de esa ventana.
+Al pasar de 101, `canSort` se apaga (`WorkList.tsx`) y **la lista deja de
+ordenarse**: muestra lo que AHI devuelva, en el orden que sea. No es un problema
+de velocidad y no lo arregla nada de §12 — es el techo del diseño de la pantalla,
+y toca cuando el archivo real se acerque a ese volumen.
+
+### Dos trampas del pipeline que costaron tiempo
+
+1. **Un cambio en `genx-base.js` SÍ exige recompilar.** `publish-client.sh`
+   compone el `app-config.js` publicado a partir de **`dist/app-config.js`** (que
+   webpack genera en el build) + el delta del cliente. Solo el **delta** se
+   inyecta al publicar. La propiedad de "compilar 1, publicar N" de
+   `GENX-MULTI-TENANT.md` §4 aplica al delta, **no al base**.
+2. **El data source no vive en `app.bundle.js`.** Está en un chunk aparte
+   (`9195.bundle.*.js`). Buscar el cambio en el bundle principal da cero
+   ocurrencias y parece que la publicación falló, cuando está perfecta.
+
 ## Lo que NO hacer
 
+- **Volver a poner `includefield` en la búsqueda de ESTUDIOS.** Cuesta ~19 ms por
+  fila (1488 vs 537 ms con 47 estudios) para traer un StudyDescription que estaba
+  lleno en el 13 % de las filas y un Modality que `00080061` ya da gratis y más
+  completo (§12). El de **series** es otra cosa y es gratis: no lo quites.
+- **Buscar el caché como culpable de que la lista tarde en abrir.** Se midió: el
+  bundle ya venía cacheado y la apertura seguía en 3 s porque el 45 % era una
+  sola consulta (§12). Y cachear el listado en el edge es justo lo que §7 y §10
+  prohíben — es mutable y un hit no invoca al authorizer.
+- **Volver `supportsWildcard` a `false`.** Deja el filtro de Descripción
+  devolviendo **204 vacío** salvo que el usuario escriba `*TORAX*` a mano, y con
+  la columna ya quitada ese filtro es el único acceso al dato (§12).
+- **Encender `supportsFuzzyMatching` para arreglar el case.** Devuelve 11 de 47
+  estudios buscando "galvan", y solo aplica a `PatientName` — ni siquiera toca el
+  filtro de Descripción (§12).
 - **Depurar el authorizer, el IAM o CORS ante un 403 de AHI sin antes mirar
   CloudWatch.** Si el log del authorizer está **vacío**, AHI cortó antes de
   invocarlo y el problema está en los claims del token — casi siempre un
