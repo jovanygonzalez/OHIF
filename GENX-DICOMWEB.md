@@ -488,8 +488,41 @@ HTTP admitiría `max-age` de un año. Los 8 h son deliberados: una jornada, y el
 dato se purga solo del disco de la estación. Vive en
 `ahi_browser_cache_seconds` (`modules/viewer-site/variables.tf`).
 
+## 11. "Datasource connection error": qué mirar, y en qué orden
+
+Es el mensaje que el visor muestra ante *cualquier* fallo de la fuente de datos,
+así que por sí solo no dice nada. Los tres candidatos, ordenados por frecuencia:
+
+| # | Sospecha | Comando | Señal |
+|---|---|---|---|
+| 1 | **Reloj adelantado** del host de Keycloak | `api/containers/keycloak/clock.ps1` | deriva positiva > ~250 ms |
+| 2 | **Túnel de Keycloak caído** | `curl -s -o /dev/null -w "%{http_code}" https://auth.genx.mx/realms/genx` | 530 (en el navegador se ve como error de **CORS**) |
+| 3 | CloudFront/AHI de verdad | `curl -s -o /dev/null -w "%{http_code}" -H "Accept: application/dicom+json" https://{dominio}/datastore/{id}/studies` | 403 `Missing Authentication Token` = sano (falta el token, nada más) |
+
+**El discriminador que ahorra horas:**
+
+```bash
+aws logs tail /aws/lambda/genx-ahi-oidc-authorizer --since 1h
+```
+
+- **Vacío** → AHI cortó **antes** de invocarnos. El problema está en los claims
+  del token (`iat` futuro, o `aud` ausente), **no** en el authorizer ni en el IAM.
+  Es el caso 1 y es el más común.
+- **Con eventos** → nos invocaron; ahí sí el problema es nuestro (mapa de
+  datastores, issuer, JWKS).
+
+El caso 1 es traicionero porque **el reloj se desincroniza solo**: en Windows
+fuera de dominio el servicio de hora es *trigger-start* y deja de sondear después
+del arranque. Un visor que "funcionaba ayer y hoy no", sin que nadie tocara nada,
+es casi siempre esto. Detalle completo y arreglo permanente:
+[`../api/containers/keycloak/README.md`](../api/containers/keycloak/README.md) §6.
+
 ## Lo que NO hacer
 
+- **Depurar el authorizer, el IAM o CORS ante un 403 de AHI sin antes mirar
+  CloudWatch.** Si el log del authorizer está **vacío**, AHI cortó antes de
+  invocarlo y el problema está en los claims del token — casi siempre un
+  reloj de host adelantado, que produce `iat` en el futuro (§11).
 - **Volver a v3 por el problema de rendimiento.** El rendimiento lo daba
   CloudFront, no el proxy, y CloudFront se recupera sin el proxy. Hacer rollback
   reintroduce el techo de concurrencia y el Function URL público.
