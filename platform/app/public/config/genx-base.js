@@ -266,8 +266,50 @@ window.config = {
         // Solo afecta la busqueda de ESTUDIOS. El includefield del QIDO de
         // SERIES (al expandir una fila) es gratis (233 vs 239 ms) y sigue ahi.
         qidoIncludeFields: [],
+        // DEJAR EN false. Probado contra AHI: lo acepta y vuelve `PatientName`
+        // insensible a mayusculas, pero devuelve 11 de 47 estudios buscando
+        // "galvan" -- es el matching fonetico de nombres de DICOM y es
+        // demasiado laxo para una lista clinica. Ademas `mapParams` solo lo
+        // aplica a PatientName, asi que ni siquiera arregla el filtro de
+        // Descripcion, que es el caso que importa. El comodin de abajo si.
         supportsFuzzyMatching: false,
-        supportsWildcard: false,
+        // ENCENDIDO a proposito. Sin esto OHIF manda el valor del filtro TAL
+        // CUAL y AHI exige coincidencia exacta: escribir `TORAX` en el filtro
+        // de Descripcion devuelve 204 vacio y solo funciona escribiendo
+        // `*TORAX*` a mano, que nadie va a adivinar.
+        //
+        // Pesa mas desde que `qidoIncludeFields: []` (arriba) quito la columna
+        // Descripcion de la lista: el filtro paso a ser el unico acceso a ese
+        // dato. El filtro NO depende de includefield -- va server-side.
+        //
+        // Medido contra AHI (47 estudios):
+        //
+        //   filtro                        sin comodin      con comodin
+        //   StudyDescription=TORAX        204, 0 filas     *TORAX*     -> 1
+        //   AccessionNumber=FAA           204, 0 filas     *FAA*       -> 11
+        //   00100020=2604 (MRN parcial)   204, 0 filas     *2604*      -> 1
+        //   AccessionNumber=FAA-45587     1                *FAA-45587* -> 1
+        //   00100020=26046433             1                *26046433*  -> 1
+        //   PatientName=GALVAN            1                *GALVAN*    -> 1
+        //
+        // Ninguna consulta exacta se degrada al envolverla; solo empiezan a
+        // funcionar las parciales. Es lo que upstream considera normal: casi
+        // todos los configs de ejemplo de OHIF lo traen en true.
+        //
+        // Envuelve exactamente 4 campos (`withWildcard` en qido.js): PatientName,
+        // 00100020, AccessionNumber y StudyDescription. NO toca ModalitiesInStudy,
+        // StudyDate ni StudyInstanceUID, y solo aplica a la busqueda de ESTUDIOS.
+        //
+        // Dos limites que quedan:
+        //   - Sigue siendo sensible a mayusculas: `*torax*` -> 204, `*TORAX*` -> 1.
+        //     El comodin arregla lo parcial, no el case. AHI no ofrece perilla.
+        //   - Envolver un valor exacto puede casar mas de una fila por subcadena.
+        //     Es el comportamiento esperado de una caja de busqueda.
+        //
+        // El panel de estudios previos del paciente NO se ve afectado:
+        // getStudiesForPatientByMRN pasa `disableWildcard: true`, que en
+        // qido.js tiene precedencia sobre esta bandera.
+        supportsWildcard: true,
         supportsReject: false,
         bulkDataURI: { enabled: true },
         // ─────────────────────────────────────────────────────────────────
