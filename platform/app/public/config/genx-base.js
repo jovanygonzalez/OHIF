@@ -233,6 +233,39 @@ window.config = {
         // los soporta, encenderlos ahorra viajes; encenderlos a ciegas produce
         // búsquedas que devuelven vacío sin error.
         qidoSupportsIncludeField: false,
+        // NO TOCAR SIN MEDIR. Esta linea vale ~950 ms en CADA apertura de la
+        // lista de estudios.
+        //
+        // Por default OHIF pide `includefield=00081030,00080060` en la busqueda
+        // de estudios (mapParams, extensions/default/.../qido.js). A nivel
+        // ESTUDIO, AHI tiene que abrir el metadata de cada image set para
+        // responder eso: cuesta ~19 ms por fila devuelta y escala hasta el tope
+        // de 101 que pide OHIF.
+        //
+        // Medido con 47 estudios, corridas ALTERNADAS por el camino real
+        // (navegador -> CloudFront -> authorizer OIDC -> AHI):
+        //
+        //   con includefield -> 1713 / 1488 / 1449 ms   (mediana 1488)
+        //   sin includefield ->  469 /  537 /  573 ms   (mediana  537)
+        //
+        // En la apertura completa de la lista (bundle ya cacheado, sesion viva)
+        // eso es pasar de ~3.1 s a ~2.1 s; el QIDO era el 45% del total.
+        //
+        // Lo que se pierde es poco y ya se verifico campo por campo:
+        //   - 00080060 (Modality) es REDUNDANTE. AHI devuelve 00080061
+        //     (ModalitiesInStudy) sin pedirlo, y es MAS completo: donde
+        //     Modality dice `US`, ModalitiesInStudy dice `SR/US`.
+        //     getModalities() (platform/core/src/DICOMWeb) cae a
+        //     ModalitiesInStudy cuando Modality falta -> la columna no cambia.
+        //   - 00081030 (StudyDescription) SI se pierde en la lista. Venia lleno
+        //     en 6 de 47 estudios (13%). Ese es el trade real.
+        //
+        // No hay termino medio: pedir un solo campo dispara el mismo costo
+        // (00081030 solo = 1528 ms, 00080060 solo = 1322 ms). Es todo o nada.
+        //
+        // Solo afecta la busqueda de ESTUDIOS. El includefield del QIDO de
+        // SERIES (al expandir una fila) es gratis (233 vs 239 ms) y sigue ahi.
+        qidoIncludeFields: [],
         supportsFuzzyMatching: false,
         supportsWildcard: false,
         supportsReject: false,

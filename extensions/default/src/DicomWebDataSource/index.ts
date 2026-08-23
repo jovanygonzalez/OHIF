@@ -37,6 +37,13 @@ export type DicomWebConfig = {
   wadoRoot?: string; // - Base URL to use for WADO requests
   wadoUri?: string; // - Base URL to use for WADO URI requests
   qidoSupportsIncludeField?: boolean; // - Whether QIDO supports the "Include" option to request additional fields in response
+  /**
+   * GENX: campos extra que la busqueda de ESTUDIOS pide con `includefield`.
+   * Sin definir se usa el default de upstream (['00081030', '00080060']).
+   * `[]` no manda el parametro -- ver el comentario en `mapParams` (qido.js):
+   * contra AWS HealthImaging cuesta ~950 ms por consulta y casi no aporta.
+   */
+  qidoIncludeFields?: string[];
   imageRendering?: string; // - wadors | ? (unsure of where/how this is used)
   thumbnailRendering?: string;
   /**
@@ -217,6 +224,7 @@ function createDicomWebApi(dicomWebConfig: DicomWebConfig, servicesManager) {
             mapParams(origParams, {
               supportsFuzzyMatching: dicomWebConfig.supportsFuzzyMatching,
               supportsWildcard: dicomWebConfig.supportsWildcard,
+              includeFields: dicomWebConfig.qidoIncludeFields,
             }) || {};
 
           const results = await qidoSearch(qidoDicomWebClient, undefined, undefined, mappedParams);

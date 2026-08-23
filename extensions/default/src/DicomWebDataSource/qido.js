@@ -148,11 +148,37 @@ function mapParams(params, options = {}) {
   if (!params) {
     return;
   }
-  const commaSeparatedFields = [
-    '00081030', // Study Description
-    '00080060', // Modality
-    // Add more fields here if you want them in the result
-  ].join(',');
+  // Campos extra que se piden con `includefield` en la busqueda de ESTUDIOS.
+  //
+  // GENX: configurable via `qidoIncludeFields` del data source. El default es
+  // el de upstream, asi que sin configurar nada el comportamiento no cambia.
+  // Un arreglo vacio ([]) elimina el parametro por completo: `''` no sobrevive
+  // la limpieza de `parameters` de mas abajo.
+  //
+  // Por que se puede querer apagarlo (medido contra AWS HealthImaging,
+  // 47 estudios, corridas alternadas por el camino real navegador ->
+  // CloudFront -> authorizer -> AHI):
+  //
+  //   includefield=00081030,00080060  ->  1488 ms (mediana)
+  //   sin includefield                ->   537 ms (mediana)
+  //
+  // A nivel ESTUDIO, AHI tiene que abrir el metadata de cada image set para
+  // responder estos campos: el costo es ~19 ms por estudio devuelto y crece
+  // hasta el tope de 101 filas. A nivel SERIE es gratis (233 vs 239 ms), asi
+  // que `seriesInStudy` mas arriba no tiene este problema y se deja como esta.
+  //
+  // Y lo que se pierde es poco: `00080060` (Modality) es redundante porque
+  // `00080061` (ModalitiesInStudy) ya viene sin pedirlo y es MAS completo
+  // (lista `SR/US` donde Modality dice solo `US`); `getModalities()` devuelve
+  // ModalitiesInStudy cuando Modality falta, asi que la columna no cambia.
+  // `00081030` (StudyDescription) si se pierde -- venia lleno en 6 de 47.
+  const commaSeparatedFields = (
+    options.includeFields ?? [
+      '00081030', // Study Description
+      '00080060', // Modality
+      // Add more fields here if you want them in the result
+    ]
+  ).join(',');
 
   const useWildcard =
     params?.disableWildcard !== undefined ? !params.disableWildcard : options.supportsWildcard;
@@ -173,6 +199,7 @@ function mapParams(params, options = {}) {
     limit: params.limit || 101,
     offset: params.offset || 0,
     fuzzymatching: options.supportsFuzzyMatching === true,
+    // Cadena vacia => la limpieza de abajo lo descarta y no viaja el parametro.
     includefield: commaSeparatedFields, // serverSupportsQIDOIncludeField ? commaSeparatedFields : 'all',
   };
 
