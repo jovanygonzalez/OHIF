@@ -193,6 +193,216 @@ window.config = {
     console.error('[genx] HealthImaging request failed', error?.status ?? '', error);
     window.genxSession?.reportHttpError?.(error);
   },
+  // ─────────────────────────────────────────────────────────────────────────
+  // Sellado de los objetos DICOM que el visor ESCRIBE (F2 de docs/annotations.md)
+  //
+  // Cuando el radiólogo guarda mediciones, OHIF construye un DICOM SR con dcmjs
+  // y lo manda por STOW-RS a AWS HealthImaging. Ese objeto sale de fábrica con
+  // los defaults de `DerivedDataset`, que es una clase pensada para
+  // INVESTIGACIÓN (dcmjs.es.js:13974-14001):
+  //
+  //   ContentQualification = "RESEARCH"            <- hardcodeado, sin perilla
+  //   ImageComments        = "NOT FOR CLINICAL USE"
+  //   Manufacturer         = "Unspecified"
+  //   PersonObserverName   = "unknown^unknown"
+  //
+  // Verificado en el objeto real guardado el 24-ago-2026 (§8 del doc): llegó a
+  // AHI con los tres primeros puestos y sin autor. Un producto clínico no puede
+  // emitir objetos que se autodeclaran no clínicos y anónimos — y en DICOM no
+  // existe borrar, así que cada guardado anterior a esto queda así PARA SIEMPRE
+  // dentro del estudio del paciente. Por eso el sellado va acá y no "después".
+  //
+  // ⚠️ EL HOOK NO RECIBE LO QUE SU NOMBRE SUGIERE. En
+  // extensions/cornerstone-dicom-sr/src/commandsModule.ts:131-136:
+  //
+  //     let dicomDict;                                   // <- undefined
+  //     if (typeof onBeforeDicomStore === 'function') {
+  //       dicomDict = onBeforeDicomStore({ dicomDict, measurementData, naturalizedReport });
+  //     }
+  //     await dataSource.store.dicom(naturalizedReport, null, dicomDict);
+  //
+  // O sea: el `dicomDict` que llega es SIEMPRE `undefined`, y lo que la función
+  // DEVUELVE se convierte en el dicomDict que se escribe, con precedencia sobre
+  // `naturalizedReport`. Entonces el patrón correcto es exactamente uno:
+  //
+  //     mutar `naturalizedReport` in place y devolver `undefined`.
+  //
+  // Devolver un objeto reemplaza el SR entero por algo que casi seguro no es un
+  // `DicomDict` válido, y el fallo aparece recién en el POST.
+  //
+  // Lo que NO se puede arreglar desde acá: `ImplementationVersionName`, que
+  // DicomWebDataSource hornea como la constante 'OHIF-3.11.0' (index.ts:26) y
+  // por lo tanto no data el build. No usarlo para diagnosticar versiones.
+  customizationService: (function () {
+    var MANUFACTURER = 'GenX';
+    var MODEL_NAME = 'GenX RIS Viewer';
+
+    // Prefijo de publicación del bundle ('/v4/' -> 'v4'). Es la única versión
+    // REAL que el visor conoce de sí mismo: scripts/build.sh y publish-client.sh
+    // versionan por ese prefijo. Ver arriba por qué ImplementationVersionName no
+    // sirve para esto.
+    var SOFTWARE_VERSION = String(window.PUBLIC_URL || '').replace(/\//g, '') || 'dev';
+
+    // Defaults de dcmjs que hay que reconocer para pisarlos SOLO si nadie los
+    // cambió. El de SeriesDescription casi nunca sobrevive —promptSaveReport le
+    // pasa el nombre que teclea el usuario— pero 'Create Report' sí llega tal
+    // cual cuando deja el campo vacío, y es igual de opaco en la lista de series.
+    var RESEARCH_IMAGE_COMMENTS = 'NOT FOR CLINICAL USE';
+    var GENERIC_SERIES_DESCRIPTIONS = ['Research Derived series', 'Create Report'];
+
+    // TID 1002 Observer Context: el ítem PNAME cuyo concepto es
+    // DCM 121008 "Person Observer Name" (dcmjs.es.js:15094-15102).
+    var PERSON_OBSERVER_NAME_CODE = '121008';
+
+    // El perfil OIDC vive en localStorage porque nextOIDCClient.ts fija
+    // `userStore: WebStorageStateStore({ store: window.localStorage })` a
+    // propósito (ver el comentario largo ahí). La llave la arma oidc-client-ts
+    // como 'oidc.' + 'user:{authority}:{client_id}'.
+    function sessionProfile() {
+      try {
+        var oidc = (window.config.oidc || [])[0];
+        if (!oidc || !oidc.authority) {
+          return null;
+        }
+        var raw = window.localStorage.getItem('oidc.user:' + oidc.authority + ':' + oidc.client_id);
+        return raw ? JSON.parse(raw).profile || null : null;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    // VR PN: '^' separa componentes, '=' separa grupos (alfabético/ideográfico/
+    // fonético) y '\' separa valores. Un nombre con cualquiera de los tres
+    // adentro corrompe la estructura, así que se neutralizan.
+    function pnComponent(value) {
+      return String(value == null ? '' : value)
+        .replace(/[\^=\\]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 64);
+    }
+
+    function personName(profile) {
+      if (!profile) {
+        return null;
+      }
+      var family = pnComponent(profile.family_name);
+      var given = pnComponent(profile.given_name);
+      if (family && given) {
+        return family + '^' + given;
+      }
+      // Sin los dos claims no se puede partir el nombre: en español los
+      // apellidos compuestos ('María del Carmen Pérez García') hacen que
+      // cualquier heurística de "la última palabra es el apellido" se
+      // equivoque. Un PN de un solo componente es válido y honesto.
+      return pnComponent(profile.name) || pnComponent(profile.preferred_username) || null;
+    }
+
+    // Fecha legible A PARTIR DEL OBJETO, no del reloj del navegador: así la
+    // etiqueta y el ContentDate/ContentTime del SR nunca se contradicen.
+    function contentStamp(report) {
+      var d = String(report.ContentDate || '');
+      var t = String(report.ContentTime || '');
+      if (d.length < 8) {
+        return '';
+      }
+      var stamp = d.slice(0, 4) + '-' + d.slice(4, 6) + '-' + d.slice(6, 8);
+      return t.length >= 4 ? stamp + ' ' + t.slice(0, 2) + ':' + t.slice(2, 4) : stamp;
+    }
+
+    function setPersonObserverName(report, name) {
+      var items = report.ContentSequence;
+      if (!items) {
+        return false;
+      }
+      if (!Array.isArray(items)) {
+        items = [items];
+      }
+      for (var i = 0; i < items.length; i++) {
+        var item = items[i];
+        if (!item || item.ValueType !== 'PNAME') {
+          continue;
+        }
+        var concept = item.ConceptNameCodeSequence;
+        if (Array.isArray(concept)) {
+          concept = concept[0];
+        }
+        if (concept && concept.CodeValue === PERSON_OBSERVER_NAME_CODE) {
+          item.PersonName = name;
+          return true;
+        }
+      }
+      return false;
+    }
+
+    return {
+      onBeforeDicomStore: function (params) {
+        var report = params && params.naturalizedReport;
+        if (!report) {
+          return undefined;
+        }
+
+        // 1. Quitar los sellos de investigación.
+        //
+        // Se BORRAN en vez de reescribirse a 'PRODUCT'. Los dos son atributos
+        // que ni siquiera pertenecen al IOD de SR —el propio dcmjs deja el TODO
+        // "ImageComments no es parte del Enhanced SR IOD" justo arriba— así que
+        // ausentes es lo conforme. Y 'PRODUCT' significa, en PS3.3, que el
+        // contenido lo produjo un equipo aprobado/autorizado: afirmarlo sería
+        // cambiar una etiqueta falsa por otra. No aseverar nada es lo correcto
+        // mientras el producto no tenga esa aprobación.
+        delete report.ContentQualification;
+        if (report.ImageComments === RESEARCH_IMAGE_COMMENTS) {
+          delete report.ImageComments;
+        }
+        // dcmjs los deja en cadena vacía (options.ClinicalTrial* || ''). Son
+        // atributos de ensayo clínico: vacíos no dicen nada y ensucian.
+        [
+          'ClinicalTrialTimePointID',
+          'ClinicalTrialCoordinatingCenterName',
+          'ClinicalTrialSeriesID',
+        ].forEach(function (tag) {
+          if (!report[tag]) {
+            delete report[tag];
+          }
+        });
+        // '1' es el relleno de DerivedDataset, no un número de serie.
+        if (report.DeviceSerialNumber === '1') {
+          delete report.DeviceSerialNumber;
+        }
+
+        // 2. Identidad del producto. Además de ser lo correcto, es la marca por
+        // la que el ingestor de F3 va a reconocer los SR propios entre los que
+        // pueda haber de otros orígenes en el mismo datastore.
+        report.Manufacturer = MANUFACTURER;
+        report.ManufacturerModelName = MODEL_NAME;
+        report.SoftwareVersions = SOFTWARE_VERSION;
+
+        // 3. SeriesDescription legible. Se RESPETA lo que haya escrito el
+        // usuario en el diálogo de guardado; solo se sustituyen los genéricos.
+        var description = String(report.SeriesDescription || '').trim();
+        if (!description || GENERIC_SERIES_DESCRIPTIONS.indexOf(description) !== -1) {
+          var stamp = contentStamp(report);
+          report.SeriesDescription = stamp ? 'Anotaciones ' + stamp : 'Anotaciones';
+        }
+
+        // 4. Autoría. Si la sesión no alcanza para armar un nombre se deja el
+        // 'unknown^unknown' de dcmjs: es feo, pero inventar un autor en un
+        // objeto clínico es peor que admitir que no se sabe.
+        var name = personName(sessionProfile());
+        if (name) {
+          if (!setPersonObserverName(report, name)) {
+            console.warn('[genx] SR sin ítem de Person Observer Name; no se pudo firmar');
+          }
+        } else {
+          console.warn('[genx] sin perfil OIDC en sesión; el SR queda sin autor');
+        }
+
+        // ⚠️ undefined A PROPÓSITO. Ver el bloque de arriba.
+        return undefined;
+      },
+    };
+  })(),
   // Branding por defecto. Un cliente puede pisarlo desde su delta.
   whiteLabeling: {
     createLogoComponentFn: function (React) {
