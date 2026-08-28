@@ -45,7 +45,7 @@ window.config = {
         friendlyName: 'AWS HealthImaging',
         name: 'healthimaging',
         healthlake: {
-          datastoreID: '233cd98bfad7421ab3ac51e9235cc5b1',
+          datastoreID: 'c107f00dbca2487b9b98235ba84f428a',
           endpoint: 'https://dx54b5pa2bihl34k37de245hai0ioaaa.lambda-url.us-east-1.on.aws',
         },
         wadoRoot: 'https://dx54b5pa2bihl34k37de245hai0ioaaa.lambda-url.us-east-1.on.aws',

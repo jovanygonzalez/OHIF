@@ -438,24 +438,30 @@ correcta. Y si alguien sí quemara la anotación en los píxeles, sería otra
 instancia con otro UID, o sea otra URL. **El caché aguanta los dos casos por la
 misma razón: solo cachea lo direccionado por un UID inmutable.**
 
-> ⚠️ **Escribir de vuelta (STOW-RS) hoy NO funciona, y el error miente.** Los
-> bloqueos son **dos**, no tres: el rol del authorizer solo tiene acciones de
-> lectura, y los behaviors de `/datastore/*` solo permiten `GET/HEAD/OPTIONS`, así
-> que **un POST devuelve 403 emitido por CloudFront** (`Server: CloudFront`), no
-> por AHI. Ese 403 se lee igual que un problema de permisos y manda a depurar el
-> authorizer o el IAM, que son el lugar equivocado.
+> ✅ **Escribir de vuelta (STOW-RS) ya funciona** — verificado el 24-ago-2026: una
+> medición guardada desde OHIF entra como **serie nueva del mismo estudio** y el
+> QIDO de series la lista (`../docs/annotations.md` §8, estado de F1). Los **dos**
+> bloqueos que había se levantaron en ese mismo `apply`: el rol del authorizer solo
+> tenía acciones de lectura (hoy `StoreDICOM` + `StoreDICOMStudy`, **sin ninguna de
+> borrado** — a propósito, ver `annotations.md` §7.3), y los behaviors de
+> `/datastore/*` solo permitían `GET/HEAD/OPTIONS`.
 >
-> **CORRECCIÓN (verificada 2026-08-24).** Una versión anterior listaba como tercer
-> bloqueo que "el visor no tiene `stowRoot` configurado". **`stowRoot` no existe en
-> OHIF 3.12**: `DicomWebDataSource` arma el cliente de escritura solo con
-> `wadoRoot` (`index.ts:198-205`) y `store.dicom` usa ese mismo cliente
-> (`index.ts:409`); `dicomweb-client` acepta `stowURLPrefix` pero OHIF nunca se lo
-> pasa. Como el `wadoRoot` ya es `/datastore/{id}`, el visor **ya postearía al
-> endpoint `StoreDICOM` correcto de AHI** (`POST /datastore/{id}/studies`) sin
-> tocar el config. El corolario incómodo es el otro lado de la moneda: **el STOW no
-> se puede redirigir a otro host por configuración**, solo patcheando el data
-> source. `dicomUploadEnabled` es otra cosa (el botón de subir estudios en el
-> worklist) y no interviene acá.
+> **La trampa de diagnóstico sigue valiendo si algo vuelve a romperse.** Mientras el
+> behavior estuvo cerrado, el `POST` devolvía **403 emitido por CloudFront**
+> (`Server: CloudFront`), no por AHI. Ese 403 se lee igual que un problema de
+> permisos y manda a depurar el authorizer o el IAM, que son el lugar equivocado:
+> mirar el header `Server` antes de tocar nada.
+>
+> **`stowRoot` no existe en OHIF 3.12** (verificado 2026-08-24). Una versión
+> anterior lo listaba como tercer bloqueo. `DicomWebDataSource` arma el cliente de
+> escritura solo con `wadoRoot` (`index.ts:198-205`) y `store.dicom` usa ese mismo
+> cliente (`index.ts:409`); `dicomweb-client` acepta `stowURLPrefix` pero OHIF nunca
+> se lo pasa. Como el `wadoRoot` ya es `/datastore/{id}`, el visor postea al endpoint
+> `StoreDICOM` correcto de AHI (`POST /datastore/{id}/studies`) sin tocar el config.
+> El corolario incómodo es el otro lado de la moneda: **el STOW no se puede
+> redirigir a otro host por configuración**, solo patcheando el data source.
+> `dicomUploadEnabled` es otra cosa (el botón de subir estudios en el worklist) y no
+> interviene acá.
 >
 > Diseño completo de anotaciones e imágenes clave: [`../docs/annotations.md`](../docs/annotations.md).
 

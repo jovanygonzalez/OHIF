@@ -75,7 +75,7 @@ window.config = {
         friendlyName: 'AWS HealthImaging',
         name: 'healthimaging',
         healthlake: {
-          datastoreID: '233cd98bfad7421ab3ac51e9235cc5b1',
+          datastoreID: 'c107f00dbca2487b9b98235ba84f428a',
           // Relative, so every request goes to whatever host is serving this
           // page — that's what makes it same-origin. It CANNOT be '': the
           // extension throws `endpoint is mandatory` on any falsy value while
