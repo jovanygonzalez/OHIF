@@ -16,6 +16,8 @@ interface ViewportDownloadFormNewProps {
   onEnableViewport: (element: HTMLElement) => void;
   onDisableViewport: () => void;
   onDownload: (filename: string, fileType: string) => void;
+  /** GENX: copia la captura al portapapeles del sistema. Ver el form. */
+  onCopy?: () => Promise<'ok' | 'unsupported' | 'error'>;
   warningState: { enabled: boolean; value: string };
 }
 
@@ -32,11 +34,15 @@ function ViewportDownloadFormNew({
   onEnableViewport,
   onDisableViewport,
   onDownload,
+  onCopy,
 }: ViewportDownloadFormNewProps) {
   const [viewportElement, setViewportElement] = useState<HTMLElement | null>(null);
   const [showWarningMessage, setShowWarningMessage] = useState(true);
   const [filename, setFilename] = useState(DEFAULT_FILENAME);
   const [fileType, setFileType] = useState('jpg');
+  // GENX: copiar no deja rastro visible. Sin acuse el médico no sabe si funcionó
+  // y vuelve a pulsar; el botón se contesta a sí mismo por unos segundos.
+  const [copyState, setCopyState] = useState<'idle' | 'busy' | 'ok' | 'error'>('idle');
   const { t } = useTranslation('CaptureViewportModal');
 
   useEffect(() => {
@@ -134,6 +140,31 @@ function ViewportDownloadFormNew({
             </ImageModal.SwitchOption>
           )}
           <FooterAction className="mt-2">
+            {/*
+              GENX: copiar al portapapeles. Va a la IZQUIERDA y NO cierra el
+              modal: el médico puede ajustar el tamaño o apagar las marcas y
+              copiar otra vez sin volver a abrir. Guardar sí cierra, porque
+              descargar termina la tarea.
+            */}
+            {onCopy && (
+              <FooterAction.Left>
+                <FooterAction.Secondary
+                  disabled={copyState === 'busy'}
+                  onClick={async () => {
+                    setCopyState('busy');
+                    const result = await onCopy();
+                    setCopyState(result === 'ok' ? 'ok' : 'error');
+                    window.setTimeout(() => setCopyState('idle'), 2500);
+                  }}
+                >
+                  {copyState === 'ok'
+                    ? t('Copied')
+                    : copyState === 'error'
+                      ? t('Copy failed')
+                      : t('Copy to clipboard')}
+                </FooterAction.Secondary>
+              </FooterAction.Left>
+            )}
             <FooterAction.Right>
               <FooterAction.Secondary onClick={onClose}>
                 {t('Common:Cancel')}

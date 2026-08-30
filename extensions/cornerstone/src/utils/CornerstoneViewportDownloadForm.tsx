@@ -1,7 +1,12 @@
 import { utils } from '@ohif/core';
 import React, { useEffect, useState } from 'react';
 import html2canvas from 'html2canvas';
-import { getEnabledElement, StackViewport, BaseVolumeViewport } from '@cornerstonejs/core';
+import {
+  getEnabledElement,
+  StackViewport,
+  BaseVolumeViewport,
+  metaData,
+} from '@cornerstonejs/core';
 import { ToolGroupManager, segmentation, Enums } from '@cornerstonejs/tools';
 import { getEnabledElement as OHIFgetEnabledElement } from '../state';
 import { useSystem } from '@ohif/core/src';
@@ -215,19 +220,129 @@ const CornerstoneViewportDownloadForm = ({
     }
   }, [viewportDimensions, showAnnotations]);
 
-  const handleDownload = async (baseFilename: string, fileType: string) => {
-    const divForDownloadViewport = document.querySelector(
-      `div[data-viewport-uid="${VIEWPORT_ID}"]`
-    );
+  /**
+   * GENX: la captura, compartida por descargar y copiar.
+   *
+   * El canvas que sale de aquí ya trae las marcas dibujadas encima del pixel —
+   * cornerstone las pintó— y con la ventana, el zoom y el encuadre que eligió el
+   * médico. Eso es criterio clínico, y es lo que un render del servidor tendría
+   * que adivinar.
+   */
+  const captureCanvas = async (): Promise<HTMLCanvasElement | null> => {
+    const div = document.querySelector(`div[data-viewport-uid="${VIEWPORT_ID}"]`);
+    if (!div) {
+      console.debug('No viewport found for capture');
+      return null;
+    }
+    return html2canvas(div as HTMLElement);
+  };
 
-    if (!divForDownloadViewport) {
-      console.debug('No viewport found for download');
+  const handleDownload = async (baseFilename: string, fileType: string) => {
+    const canvas = await captureCanvas();
+    if (!canvas) {
       return;
     }
-
     const filename = `${baseFilename}.${fileType}`;
-    const canvas = await html2canvas(divForDownloadViewport as HTMLElement);
     downloadUrl(canvas.toDataURL(`image/${fileType}`, 1.0), { filename });
+  };
+
+  /**
+   * GENX: de qué instancia DICOM es esta captura.
+   *
+   * Sin esto la imagen pegada en el informe es pixel mudo: nadie puede volver de
+   * la figura al estudio. Viaja en atributos `data-genx-*` del sabor text/html
+   * del portapapeles, así que es invisible para quien pegue en Word y
+   * recuperable para quien pegue en el editor de GenX.
+   *
+   * Devuelve null sin ruido en un viewport de volumen (no tiene "la imagen
+   * actual") — la captura sigue siendo válida, solo que anónima.
+   */
+  const currentInstanceRef = (): Record<string, string> | null => {
+    try {
+      const { viewport } = getEnabledElement(activeViewportElement) ?? {};
+      const imageId = (viewport as StackViewport)?.getCurrentImageId?.();
+      if (!imageId) {
+        return null;
+      }
+      const sop = metaData.get('sopCommonModule', imageId);
+      const series = metaData.get('generalSeriesModule', imageId);
+      const study = metaData.get('generalStudyModule', imageId);
+      return {
+        sop: sop?.sopInstanceUID ?? '',
+        series: series?.seriesInstanceUID ?? '',
+        study: study?.studyInstanceUID ?? series?.studyInstanceUID ?? '',
+      };
+    } catch (e) {
+      console.debug('GENX: no se pudo leer la instancia actual', e);
+      return null;
+    }
+  };
+
+  /**
+   * GENX: copiar la captura al portapapeles del SISTEMA.
+   *
+   * Es la vía genérica del informe: el médico pega con Ctrl+V donde escriba, sea
+   * el editor de GenX o Word. Que no dependa de GenX es el punto — un cliente que
+   * dicta en Word no tiene otra.
+   *
+   * Se escriben DOS sabores del mismo contenido:
+   *   image/png   lo que entiende cualquier destino (Word, correo, chat)
+   *   text/html   un <img> con los identificadores DICOM en data-genx-*
+   * El editor de GenX prefiere el HTML y se queda la procedencia; el resto toma
+   * el PNG y ni se entera.
+   *
+   * ⚠️ PNG y no JPG aunque el selector diga otra cosa: `image/jpeg` NO es un tipo
+   * que el portapapeles del navegador acepte escribir.
+   *
+   * ⚠️ Los valores se pasan como PROMESAS a ClipboardItem a propósito. La captura
+   * es asíncrona, y en algunos navegadores un `clipboard.write` después de un
+   * `await` ya perdió el gesto del usuario y lo rechazan. Con promesas la llamada
+   * sale síncrona con el clic y el navegador espera el contenido.
+   */
+  const handleCopy = async (): Promise<'ok' | 'unsupported' | 'error'> => {
+    if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
+      // Contexto no seguro (http) o navegador viejo. La descarga sigue estando.
+      return 'unsupported';
+    }
+
+    const pngPromise = (async () => {
+      const canvas = await captureCanvas();
+      if (!canvas) {
+        throw new Error('GENX: no hay viewport para capturar');
+      }
+      return new Promise<Blob>((resolve, reject) => {
+        canvas.toBlob(
+          blob => (blob ? resolve(blob) : reject(new Error('GENX: toBlob vacío'))),
+          'image/png'
+        );
+      });
+    })();
+
+    const htmlPromise = pngPromise.then(async blob => {
+      const dataUrl: string = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(blob);
+      });
+      const ref = currentInstanceRef();
+      const attrs = ref
+        ? ` data-genx-sop="${ref.sop}" data-genx-series="${ref.series}" data-genx-study="${ref.study}"`
+        : '';
+      return new Blob([`<img src="${dataUrl}"${attrs} alt="Captura del visor" />`], {
+        type: 'text/html',
+      });
+    });
+
+    try {
+      await navigator.clipboard.write([
+        new ClipboardItem({ 'image/png': pngPromise, 'text/html': htmlPromise }),
+      ]);
+      return 'ok';
+    } catch (e) {
+      console.warn('GENX: no se pudo copiar al portapapeles', e);
+      return 'error';
+    }
   };
 
   const ViewportDownloadFormNew = customizationService.getCustomization(
@@ -247,6 +362,7 @@ const CornerstoneViewportDownloadForm = ({
       onEnableViewport={handleEnableViewport}
       onDisableViewport={handleDisableViewport}
       onDownload={handleDownload}
+      onCopy={handleCopy}
       warningState={warningState}
     />
   );
