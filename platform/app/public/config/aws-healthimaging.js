@@ -45,10 +45,10 @@ window.config = {
         friendlyName: 'AWS HealthImaging',
         name: 'healthimaging',
         healthlake: {
-          datastoreID: 'c107f00dbca2487b9b98235ba84f428a',
-          endpoint: 'https://dx54b5pa2bihl34k37de245hai0ioaaa.lambda-url.us-east-1.on.aws',
+          datastoreID: 'fed83c3e2d9e4829b2824a171b725a50',
+          endpoint: 'https://jeli7qvybux6lozvhnxh2tcom40capku.lambda-url.us-east-1.on.aws',
         },
-        wadoRoot: 'https://dx54b5pa2bihl34k37de245hai0ioaaa.lambda-url.us-east-1.on.aws',
+        wadoRoot: 'https://jeli7qvybux6lozvhnxh2tcom40capku.lambda-url.us-east-1.on.aws',
         singlepart: 'bulkdata,video,pdf,image/jphc',
       },
     },
