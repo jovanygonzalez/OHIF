@@ -57,3 +57,7 @@ tests/playwright-report/
 /blob-report/
 /playwright/.cache/
 .env
+
+# Terraform state (local runs — remote state lives in infra/)
+*.tfstate
+*.tfstate.*
