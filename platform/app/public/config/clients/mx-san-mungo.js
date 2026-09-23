@@ -31,7 +31,7 @@
 //
 // Contexto completo: viewer/GENX-DICOMWEB.md
 (function () {
-  var root = '/datastore/c107f00dbca2487b9b98235ba84f428a';
+  var root = '/datastore/fed83c3e2d9e4829b2824a171b725a50';
 
   Object.assign(window.config.dataSources[0].configuration, {
     // Las tres apuntan al mismo sitio: AHI expone QIDO y WADO bajo la misma
